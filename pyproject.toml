@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metamachine"
-version = "0.1.0"
+version = "0.1.1"
 description = "A simulation framework for modular robots"
 authors = [
     { name = "Chen Yu", email = "chenyu@u.northwestern.edu" }

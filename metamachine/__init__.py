@@ -31,7 +31,7 @@ limitations under the License.
 import os
 
 # Package version
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Root directory for asset and configuration file paths
 METAMACHINE_ROOT_DIR = os.path.dirname(os.path.realpath(__file__))
