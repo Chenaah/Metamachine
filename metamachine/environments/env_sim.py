@@ -337,10 +337,22 @@ class MetaMachine(Base, MujocoEnv):
         if self.sim_cfg.get("pyramidal_cone", False):
             self.xml_compiler.pyramidal_cone()
 
-        if self.sim_cfg.get("randomize_mass", False):
-            self.mass_range = self.xml_compiler.get_mass_range(
-                self.sim_cfg.random_mass_percentage
-            )
+        # Check randomization config (new style: cfg.randomization.mass)
+        randomization_cfg = getattr(self.cfg, "randomization", {})
+        mass_cfg = randomization_cfg.get("mass", {})
+        mass_enabled = mass_cfg.get("enabled", False)
+        
+        # Fallback to old style for backward compatibility
+        if not mass_enabled:
+            mass_enabled = self.sim_cfg.get("randomize_mass", False)
+        
+        if mass_enabled:
+            # Get percentage from new or old config
+            mass_percentage = mass_cfg.get("percentage", None)
+            if mass_percentage is None:
+                mass_percentage = self.sim_cfg.get("random_mass_percentage", 0.1)
+            
+            self.mass_range = self.xml_compiler.get_mass_range(mass_percentage)
 
         self.xml_string = self.xml_compiler.get_string()
 
@@ -1309,10 +1321,22 @@ class MetaMachine(Base, MujocoEnv):
     def _need_model_reload(self) -> bool:
         """Check if model needs to be reloaded for randomization."""
         self.randomize_asset = is_list_like(self.cfg.morphology.asset_file)  # type: ignore
+        
+        # Check randomization config (new style: cfg.randomization.*)
+        randomization_cfg = getattr(self.cfg, "randomization", {})
+        mass_enabled = randomization_cfg.get("mass", {}).get("enabled", False)
+        damping_enabled = randomization_cfg.get("damping", {}).get("enabled", False)
+        
+        # Fallback to old style for backward compatibility
+        if not mass_enabled:
+            mass_enabled = self.sim_cfg.get("randomize_mass", False)
+        if not damping_enabled:
+            damping_enabled = self.sim_cfg.get("randomize_damping", False)
+        
         return any(
             [
-                self.sim_cfg.get("randomize_mass", False),
-                self.sim_cfg.get("randomize_damping", False),
+                mass_enabled,
+                damping_enabled,
                 self.sim_cfg.get("add_scaffold_walls", False),
                 self.randomize_asset,
             ]
@@ -1324,18 +1348,49 @@ class MetaMachine(Base, MujocoEnv):
         if self.randomize_asset:
             self._load_robot_asset()
 
+        # Get randomization config (new style)
+        randomization_cfg = getattr(self.cfg, "randomization", {})
+        
         # Mass randomization
-        if self.sim_cfg.get("randomize_mass", False):
+        mass_cfg = randomization_cfg.get("mass", {})
+        mass_enabled = mass_cfg.get("enabled", False)
+        
+        # Fallback to old style for backward compatibility
+        if not mass_enabled:
+            mass_enabled = self.sim_cfg.get("randomize_mass", False)
+        
+        if mass_enabled:
+            # Get mass offset from new or old config
+            mass_offset = mass_cfg.get("offset", None)
+            if mass_offset is None:
+                mass_offset = self.sim_cfg.get("mass_offset", 0)
+            
             mass_dict = {
-                key: np.random.uniform(*value) + self.sim_cfg.get("mass_offset", 0)
+                key: np.random.uniform(*value) + mass_offset
                 for key, value in self.mass_range.items()
             }
             self.xml_compiler.update_mass(mass_dict)
 
         # Damping randomization
-        if self.sim_cfg.get("randomize_damping", False):
-            armature = np.random.uniform(*self.sim_cfg.random_armature_range)
-            damping = np.random.uniform(*self.sim_cfg.random_damping_range)
+        damping_cfg = randomization_cfg.get("damping", {})
+        damping_enabled = damping_cfg.get("enabled", False)
+        
+        # Fallback to old style for backward compatibility
+        if not damping_enabled:
+            damping_enabled = self.sim_cfg.get("randomize_damping", False)
+        
+        if damping_enabled:
+            # Get ranges from new or old config
+            damping_range = damping_cfg.get("range", None)
+            armature_range = damping_cfg.get("armature_range", None)
+            
+            if damping_range is None:
+                damping_range = self.sim_cfg.get("random_damping_range", [0.02, 0.2])
+            if armature_range is None:
+                armature_range = self.sim_cfg.get("random_armature_range", [0.01, 0.05])
+            
+            armature = np.random.uniform(*armature_range)
+            damping = np.random.uniform(*damping_range)
             self.xml_compiler.update_damping(armature=armature, damping=damping)
 
         # Scaffold walls
