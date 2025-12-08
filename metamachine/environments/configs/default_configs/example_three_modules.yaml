@@ -1,0 +1,108 @@
+# Three-module Configuration
+
+
+
+_base: basic_quadruped  # Inherit from basic_quadruped.yaml
+
+morphology:
+  robot_type: modular_legs    # Robot type (modular_legs for basic usage)
+  configuration: [ 0,1,0,0,    # [Parent module ID, parent position ID, child position ID, rotation ID]
+               0,3,0,0,]
+
+
+# Control Interface
+control:
+  # Action space configuration
+  num_actions: 3          # Number of actuated joints (updated from 1 to 12)
+  # Action filtering
+  filter:
+    enabled: true           # ENABLE action filtering to match old config!
+    cutoff_freq: 3.0        # Low-pass filter cutoff frequency
+  filter_action: true       # Keep for backward compatibility - MUST BE TRUE!
+
+  default_dof_pos: [0,-0.5,0.5]       # Keep for backward compatibility
+
+
+# State Observation
+observation:
+  # Observation components (unified from both configs)
+  # Reference vectors for reward calculations
+  projected_forward_vec: [0.0, 0.998583661722923, -0.05320404627506199]
+  projected_upward_vec: [0, 0.05320404627506199, 0.998583661722923]
+
+# Simulation Settings
+simulation:
+  # Core simulation parameters
+  mj_dt: 0.025             # MuJoCo physics timestep
+
+  # Rendering
+  render: true             # Enable rendering
+  render_size: [1024, 720]  # Render window size
+
+  # Control constraints
+  tn_constraint: true       # Torque-velocity constraints
+  latency_scheme: 0         # One-step latency (matches old config)
+
+  # System features
+  auto_generate_assets: false
+  random_latency_scheme: true  # Enable random latency (matches old config)
+
+  # Special features
+  broken_motors: null
+  pyramidal_cone: false
+  terrain: null
+  terrain_params: null
+  reset_terrain: false
+  reset_terrain_type: null
+  reset_terrain_params: null
+  socks: null
+  add_scaffold_walls: false
+
+  # Noise settings
+  noisy_observations: true   # Enable observation noise (matches old config)
+  obs_noise_std: 0.2         # Match old config: obs_noise_std: 0.2
+  noisy_actions: true        # Enable action noise (matches old config)
+  action_noise_std: 0.1      # Match old config: action_noise_std: 0.1
+
+  render_mode: 'mp4'  # Rendering mode options: 'none', 'viewer', 'mp4'
+
+  # Video configuration (only used when render_mode: 'mp4')
+  video_path: null
+  video_fps: null
+  video_record_interval: 100  # Record every 3rd episode
+  video_name_pattern: "episode_{episode}_quadruped"  # Name pattern with episode number
+
+# Initialization Settings
+initialization:
+  # Position and orientation (unified)
+  init_pos: [-0, 0, 0.2]
+  init_quat: [0.99875534,  0.02721209,  0.01652124, -0.03839699]             # Initial orientation (simplified format)
+
+  # Initial state randomization
+  noisy_init: false        # Match old config: noisy_init: false
+  # randomize_init_joint_pos: false
+  randomize_orientation: true    # Match old config: randomize_orientation: true
+  fully_randomize_orientation: false
+  randomize_ini_vel: false # Match old config: randomize_ini_vel: false
+
+# Randomization Settings
+randomization:
+  # Physical properties
+  mass:
+    enabled: true          # Enable mass randomization (matches old config)
+    percentage: 0.2        # Match old config: random_mass_percentage: 0.2
+    offset: 0.1            # Match old config: mass_offset: 0.1
+
+  friction:
+    enabled: true          # Enable friction randomization (matches old config)
+    range: [0.4, 0.8]      # Match old config: random_friction_range
+    detailed_range: [[0.4, 0.8], [0.4, 0.8]]  # Match old config exactly
+    rolling:
+      enabled: false
+      range: [0.0001, 0.0005]
+
+  damping:
+    enabled: true          # Enable damping randomization (matches old config)
+    range: [0.02, 0.2]     # Match old config: random_damping_range
+    armature_range: [0.01, 0.05]  # Match old config: random_armature_range
+
