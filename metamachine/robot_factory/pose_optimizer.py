@@ -221,62 +221,66 @@ def optimize_pose(
     if enable_progress_bar:
         progress.start()
 
-    # Run drop simulation
-    mjx_data = run_drop_simulation(
-        mjx_model, mjx_data, joint_pos, drop_steps, progress, task
-    )
-
-    # Extract stable state metrics
-    stable_qpos = mjx_data.qpos.copy()
-    default_joint_pos = joint_pos.copy()
-
-    stable_metrics = extract_stable_metrics(
-        mjx_data, mj_model, joint_geom_ids, joint_body_ids, spine_assumption
-    )
-
-    # Run movement phase if needed
-    movement_metrics = {}
-    if move_steps > 0:
-        movement_metrics = run_movement_phase(
-            mjx_model,
-            mjx_data,
-            default_joint_pos,
-            move_steps,
-            joint_body_idx,
-            spine_assumption,
-            stable_metrics.get("spine_local_forward"),
-            stable_metrics.get("spine_local_upward"),
-            stable_metrics.get("projected_upward"),
-            progress,
-            task,
+    try:
+        # Run drop simulation
+        mjx_data = run_drop_simulation(
+            mjx_model, mjx_data, joint_pos, drop_steps, progress, task
         )
-    else:
-        # Initialize default movement metrics for optimization types that don't use movement
-        movement_metrics = {
-            "avg_vel": jnp.zeros((mjx_data.qpos.shape[0], 2)),
-            "avg_speed": jnp.zeros(mjx_data.qpos.shape[0]),
-            "avg_projected_vel": jnp.zeros(mjx_data.qpos.shape[0]),
-            "fall_down": jnp.zeros(mjx_data.qpos.shape[0], dtype=bool),
-        }
 
-    # Calculate final score
-    final_score = calculate_optimization_score(
-        optimization_type, movement_metrics, stable_metrics, move_steps
-    )
+        # Extract stable state metrics
+        stable_qpos = mjx_data.qpos.copy()
+        default_joint_pos = joint_pos.copy()
 
-    # Extract best result
-    result = extract_best_result(
-        final_score,
-        stable_qpos,
-        default_joint_pos,
-        movement_metrics,
-        stable_metrics,
-        spine_assumption,
-        log_dir,
-    )
+        stable_metrics = extract_stable_metrics(
+            mjx_data, mj_model, joint_geom_ids, joint_body_ids, spine_assumption
+        )
 
-    if enable_progress_bar:
-        progress.stop()
+        # Run movement phase if needed
+        movement_metrics = {}
+        if move_steps > 0:
+            movement_metrics = run_movement_phase(
+                mjx_model,
+                mjx_data,
+                default_joint_pos,
+                move_steps,
+                joint_body_idx,
+                spine_assumption,
+                stable_metrics.get("spine_local_forward"),
+                stable_metrics.get("spine_local_upward"),
+                stable_metrics.get("projected_upward"),
+                progress,
+                task,
+            )
+        else:
+            # Initialize default movement metrics for optimization types that don't use movement
+            movement_metrics = {
+                "avg_vel": jnp.zeros((mjx_data.qpos.shape[0], 2)),
+                "avg_speed": jnp.zeros(mjx_data.qpos.shape[0]),
+                "avg_projected_vel": jnp.zeros(mjx_data.qpos.shape[0]),
+                "fall_down": jnp.zeros(mjx_data.qpos.shape[0], dtype=bool),
+            }
+
+        # Calculate final score
+        final_score = calculate_optimization_score(
+            optimization_type, movement_metrics, stable_metrics, move_steps
+        )
+
+        # Extract best result
+        result = extract_best_result(
+            final_score,
+            stable_qpos,
+            default_joint_pos,
+            movement_metrics,
+            stable_metrics,
+            spine_assumption,
+            log_dir,
+        )
+    except KeyboardInterrupt:
+        print("\n\nPose optimization interrupted by user (Ctrl+C).")
+        raise
+    finally:
+        if enable_progress_bar:
+            progress.stop()
 
     return result
 
@@ -376,32 +380,36 @@ def run_movement_phase(
     acc_projected_vel = jnp.zeros(mjx_data.qpos.shape[0])
     fall_down = jnp.zeros(mjx_data.qpos.shape[0], dtype=bool)
 
-    for i in range(move_steps):
-        # Apply sinusoidal motion
-        joint_pos_with_noise = default_joint_pos + jnp.sin(i / 10)
-        mjx_data = mjx_data.replace(ctrl=joint_pos_with_noise)
-        mjx_data = jit_step(mjx_model, mjx_data)
+    try:
+        for i in range(move_steps):
+            # Apply sinusoidal motion
+            joint_pos_with_noise = default_joint_pos + jnp.sin(i / 10)
+            mjx_data = mjx_data.replace(ctrl=joint_pos_with_noise)
+            mjx_data = jit_step(mjx_model, mjx_data)
 
-        # Measure global COM velocity
-        com_pos = mjx_data.xpos[:, joint_body_idx, :2].mean(axis=1)
-        com_vel = (com_pos - last_com_pos) / mjx_model.opt.timestep
-        last_com_pos = com_pos.copy()
-        acc_vel += com_vel
+            # Measure global COM velocity
+            com_pos = mjx_data.xpos[:, joint_body_idx, :2].mean(axis=1)
+            com_vel = (com_pos - last_com_pos) / mjx_model.opt.timestep
+            last_com_pos = com_pos.copy()
+            acc_vel += com_vel
 
-        # Measure local spine velocity
-        if spine_assumption and spine_local_forward is not None:
-            vel_body = mjx_data.qvel[:, 3:6]
-            projected_forward_vel = jnp.einsum(
-                "ij,ij->i", spine_local_forward, vel_body
+            # Measure local spine velocity
+            if spine_assumption and spine_local_forward is not None:
+                vel_body = mjx_data.qvel[:, 3:6]
+                projected_forward_vel = jnp.einsum(
+                    "ij,ij->i", spine_local_forward, vel_body
+                )
+                acc_projected_vel += projected_forward_vel
+
+            # Check for falls
+            fall = check_for_falls(
+                mjx_data, spine_assumption, spine_local_upward, projected_upward, mjx_model
             )
-            acc_projected_vel += projected_forward_vel
-
-        # Check for falls
-        fall = check_for_falls(
-            mjx_data, spine_assumption, spine_local_upward, projected_upward, mjx_model
-        )
-        fall_down = jnp.logical_or(fall_down, fall)
-        progress.advance(task)
+            fall_down = jnp.logical_or(fall_down, fall)
+            progress.advance(task)
+    except KeyboardInterrupt:
+        print("\nMovement phase interrupted by user.")
+        raise
 
     avg_vel = acc_vel / move_steps
     avg_speed = jnp.linalg.norm(avg_vel, axis=1)
@@ -667,10 +675,14 @@ def run_drop_simulation(
     """Run the drop simulation phase."""
     jit_step = jax.jit(jax.vmap(mjx.step, in_axes=(None, 0)))
 
-    for _i in range(drop_steps):
-        mjx_data = mjx_data.replace(ctrl=joint_pos)
-        mjx_data = jit_step(mjx_model, mjx_data)
-        progress.advance(task)
+    try:
+        for _i in range(drop_steps):
+            mjx_data = mjx_data.replace(ctrl=joint_pos)
+            mjx_data = jit_step(mjx_model, mjx_data)
+            progress.advance(task)
+    except KeyboardInterrupt:
+        print("\nDrop simulation interrupted by user.")
+        raise
 
     return mjx_data
 

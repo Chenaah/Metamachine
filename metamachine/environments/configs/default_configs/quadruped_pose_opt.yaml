@@ -1,0 +1,260 @@
+# Basic Environment Configuration
+# Unified configuration combining basic_env.yaml and basic_usage_config.yaml
+# This serves as the primary basic configuration for the metamachine environment
+
+# Core Environment Settings
+
+morphology:
+  robot_type: modular_legs    # Robot type (modular_legs for basic usage)
+  configuration: [ 0,1,0,0,    # [Parent module ID, parent position ID, child position ID, rotation ID]
+               0,3,0,0, 
+               0,13,0,0, 
+               0,15,0,0 ]
+  asset_file: null
+
+pose_optimization:
+  enabled: true              # Disable pose optimization for basic usage
+  drop_steps: 100        # 
+  move_steps: 500        
+  optimization_type: "stablefast"
+  load_pose: null
+
+
+environment:
+  # Time and control settings
+  num_envs: 1               # Number of parallel environments
+  mode: sim                 # Environment mode (real/sim) - default to sim for basic usage
+
+  # Morphology settings
+  
+  frozen_joints: null
+  theta: 0.610865          # Robot-specific parameter
+
+# Control Interface
+control:
+  dt: 0.05                  # Robot control timestep (20 Hz)
+  # Action space configuration
+  num_actions: 5          # Number of actuated joints (updated from 1 to 12)
+  action_scale: 1.0
+  symmetric_limit: 2 #0.8     # Action bounds [-0.8, 0.8] (unified parameter)
+  custom_limits: null
+  motor_range: [-6, 6]     # Action limits for real robot
+  
+  # Action filtering
+  filter:
+    enabled: true          # Enable action filtering (unified structure)
+    cutoff_freq: 3.0      # Low-pass filter cutoff frequency
+  filter_action: true      # Keep for backward compatibility
+  
+  # Action melting
+  melter:
+    enabled: false         # Disable action melting (unified structure)
+    axis: 3
+  action_melter: false     # Keep for backward compatibility
+  action_melter_axis: 3    # Keep for backward compatibility
+  
+  action_remap_type: null
+  
+  # Control mode settings
+  control_mode: position
+  default_dof_pos: [0,-1.,1.,1.,-1.]       # Keep for backward compatibility
+  
+  # PD Controller parameters
+  kp: 8.0                  # Proportional gain
+  kd: 0.2                  # Derivative gain
+
+  remapping:
+    enabled: false         # Disable remapping by default
+    remap_type: null       # No remapping type specified
+    remap_params: null     # No remap parameters specified
+
+# State Observation
+observation:
+  # Observation components (unified from both configs)
+  torso_node_id: 0         # Reference node for observations/rewards
+  components:
+    - name: projected_gravity
+    - name: ang_vel_body
+    - name: dof_pos
+      transform: cos
+    - name: dof_vel
+    - name: last_action
+  
+  # Observation processing
+  clip_observations: 100.0 # Unified value
+  include_history_steps: 3
+  
+  # Reference vectors for reward calculations
+  forward_vec: [1, 0, 0]
+  gravity_vec: [0, 0, -1]
+  projected_forward_vec: [.0, 0.894996814873533, 0.4460725292665206]
+  projected_upward_vec: [0, -0.4460725292665206, 0.894996814873533]
+
+  speed_calculation_steps: 100
+
+# Task Configuration
+task:
+  # Reward components (unified structure with both styles)
+  reward_components:
+    - name: forward_velocity
+      type: linear_velocity_tracking
+      weight: 0.7
+      params:
+        target_velocity: 0.6
+        tracking_sigma: 0.15
+
+    - name: go_straight
+      type: angular_velocity_tracking
+      weight: 0.3
+      params:
+        target_angular_velocity: 0.0
+        tracking_sigma: 0.15
+
+    # - name: energy_penalty
+    #   type: action_rate
+    #   weight: -0.01
+    # Alternative detailed reward structure (commented for basic usage)
+    # - name: "velocity_tracking"
+    #   type: "linear_velocity_tracking"
+    #   weight: 0.8
+    #   params:
+    #     target_velocity: 1.5
+    #     tracking_sigma: 0.15
+
+  # Termination conditions
+  termination_conditions:
+    termination_strategy: ballance_auto
+    max_episode_steps: 1000
+    height_threshold: 0.3
+  
+  # Command settings
+  command_x_choices: null
+  commands_ranges: null
+  predefined_commands: null
+  resampling_time: 10
+
+# Simulation Settings
+simulation:
+  # Core simulation parameters
+  mj_dt: 0.025             # MuJoCo physics timestep
+  
+  # Rendering
+  render: true             # Enable rendering
+  render_size: [1024, 720]  # Render window size
+  
+  # Control constraints
+  tn_constraint: true       # Torque-velocity constraints
+  latency_scheme: -1        # No latency simulation
+  
+  # System features
+  auto_generate_assets: false
+  random_latency_scheme: false
+  
+  # Special features
+  broken_motors: null
+  pyramidal_cone: false
+  terrain: null
+  terrain_params: null
+  reset_terrain: false
+  reset_terrain_type: null
+  reset_terrain_params: null
+  socks: null
+  add_scaffold_walls: false
+  
+  # Noise settings
+  noisy_observations: false
+  noisy_actions: false
+
+  render_mode: 'mp4'  # Rendering mode options: 'none', 'viewer', 'mp4'
+  
+  # Video configuration (only used when render_mode: 'mp4')
+  # video_path: 'robot_simulation.mp4'
+  video_fps: null
+  video_record_interval: 100  # Record every 3rd episode
+  video_name_pattern: "episode_{episode}_quadruped"  # Name pattern with episode number
+  video_path: null  # Base path (directory will be used)
+
+# Initialization Settings
+initialization:
+  # Position and orientation (unified)
+  init_pos: [-0, 0, 0.45134612]
+  init_quat: [0.94141482, -0.33129125,  0.05890461, -0.02268241]             # Initial orientation (simplified format)
+  init_qpos: null          # Overrides init_pos and init_quat if set
+  init_joint_pos: null
+  
+  # Initial state randomization
+  noisy_init: true         # Add small noise to initial position
+  # randomize_init_joint_pos: false
+  randomize_orientation: true    # Updated from basic_usage_config
+  fully_randomize_orientation: false
+  randomize_ini_vel: true
+
+# Randomization Settings
+randomization:
+  # Physical properties
+  mass:
+    enabled: false
+    percentage: 0.1
+    offset: 0              # Additional damping
+  
+  friction:
+    enabled: true          # Updated from basic_usage_config
+    range: [0.8, 1.2]      # Simplified range from basic_usage_config
+    detailed_range: [[0.8, 1.0], [0.3, 0.5]]  # Detailed range for balls and sticks
+    rolling:
+      enabled: false
+      range: [0.0001, 0.0005]
+  
+  damping:
+    enabled: false
+    range: [0.02, 0.2]
+    armature_range: [0.01, 0.05]
+  
+  # Control noise
+  action_noise:
+    enabled: false         # From basic_usage_config
+    std: 0.1
+  
+  observation_noise:
+    enabled: false         # From basic_usage_config
+    std: 0.2
+  
+  pd_controller:
+    enabled: false
+    kp_range: [15, 25]
+    kd_range: [0.3, 0.8]
+  
+  # External perturbations
+  external_torque:
+    enabled: false
+    range: [0, 4]
+    bodies: [2]
+  
+  external_force:
+    enabled: false
+    interval: 10           # Time steps
+    ranges: [[0, 4]]
+    bodies: ['l0']
+    positions: [[0,0,0]]
+    directions: [[0,0,0]]
+    durations: [10]        # Time steps
+  
+  # Assembly and DOF
+  assemble_error: false    # Requires design pipeline
+  dof_pos:
+    enabled: false
+    range: [-1, 1]
+
+  init_joint_pos:
+    enabled: true
+
+# Logging Configuration
+logging:
+  create_log_dir: true
+  data_dir: null
+  robot_data_dir: auto
+  log_raw_data: false
+  log_sa_data: false
+  print_data: false
+
+  

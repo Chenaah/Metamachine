@@ -36,6 +36,8 @@ cfg = ConfigRegistry.create_from_name("basic_quadruped")
 
 # Initialize the MetaMachine simulation environment
 env = MetaMachine(cfg)
+# Set rendering mode to viewer for visual output
+env.render_mode = "viewer"
 
 # Reset environment to initial state with fixed seed for reproducibility
 env.reset(seed=42)
@@ -52,6 +54,9 @@ for step in range(1000):
     # Step the environment forward one timestep
     # Returns: observation, reward, done, truncated, info
     obs, reward, done, truncated, info = env.step(action)
+
+    # Render the current state of the environment
+    env.render()
 
     # Access current command state (if using command-based control)
     current_commands = env.commands
