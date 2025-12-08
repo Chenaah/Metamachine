@@ -279,6 +279,38 @@ class MetaMachine(Base, MujocoEnv):
 
         # Store robot instance for potential future use
         self._robot_instance = robot
+        
+        # Create XMLCompiler from the generated XML for randomization support
+        # This enables mass/damping randomization for morphology-based robots
+        import tempfile
+        import os
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
+            f.write(self.xml_string)
+            temp_xml_path = f.name
+        
+        try:
+            self.xml_compiler = XMLCompiler(temp_xml_path)
+            
+            # Setup mass range if mass randomization is enabled
+            randomization_cfg = getattr(self.cfg, "randomization", {})
+            mass_cfg = randomization_cfg.get("mass", {})
+            mass_enabled = mass_cfg.get("enabled", False)
+            
+            # Fallback to old style for backward compatibility
+            if not mass_enabled:
+                mass_enabled = self.sim_cfg.get("randomize_mass", False)
+            
+            if mass_enabled:
+                # Get percentage from new or old config
+                mass_percentage = mass_cfg.get("percentage", None)
+                if mass_percentage is None:
+                    mass_percentage = self.sim_cfg.get("random_mass_percentage", 0.1)
+                
+                self.mass_range = self.xml_compiler.get_mass_range(mass_percentage)
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_xml_path):
+                os.unlink(temp_xml_path)
 
     def _load_draft_robot_asset_from_morphology(
         self, robot_type: Any, morphology: Any
@@ -1344,9 +1376,13 @@ class MetaMachine(Base, MujocoEnv):
 
     def _reload_model_with_randomization(self) -> None:
         """Reload model with randomization applied."""
-        # Asset randomization
+        # Asset randomization (for asset-based robots with multiple asset files)
         if self.randomize_asset:
             self._load_robot_asset()
+        # For morphology-based robots, regenerate from morphology
+        elif not hasattr(self, 'xml_compiler') or self.xml_compiler is None:
+            # Morphology-based robot without xml_compiler - skip randomization
+            return
 
         # Get randomization config (new style)
         randomization_cfg = getattr(self.cfg, "randomization", {})
@@ -1359,7 +1395,7 @@ class MetaMachine(Base, MujocoEnv):
         if not mass_enabled:
             mass_enabled = self.sim_cfg.get("randomize_mass", False)
         
-        if mass_enabled:
+        if mass_enabled and hasattr(self, 'mass_range') and hasattr(self, 'xml_compiler'):
             # Get mass offset from new or old config
             mass_offset = mass_cfg.get("offset", None)
             if mass_offset is None:
@@ -1379,7 +1415,7 @@ class MetaMachine(Base, MujocoEnv):
         if not damping_enabled:
             damping_enabled = self.sim_cfg.get("randomize_damping", False)
         
-        if damping_enabled:
+        if damping_enabled and hasattr(self, 'xml_compiler'):
             # Get ranges from new or old config
             damping_range = damping_cfg.get("range", None)
             armature_range = damping_cfg.get("armature_range", None)
