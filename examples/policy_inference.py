@@ -12,27 +12,33 @@ The script uses MetaMachine's checkpoint manager to handle model downloads:
 2. Provide a local path to a policy file
 3. Provide a direct URL to download from
 
+Configuration:
+    Modify the global variables at the top of this file to customize behavior:
+    
+    # To use a different model from registry:
+    MODEL = "your_model_name"
+    
+    # To use a local policy file:
+    POLICY_PATH = "./path/to/your/policy.pkl"
+    MODEL = None  # Set this to None when using POLICY_PATH
+    
+    # To download from a custom URL:
+    MODEL_URL = "https://example.com/policy.pkl"
+    MODEL = None  # Set this to None when using MODEL_URL
+    
+    # To customize simulation settings:
+    NUM_STEPS = 500
+    RENDER_MODE = "mp4"  # or "viewer" or "none"
+    SEED = 123
+    
+    # To list available models or show cache info:
+    LIST_MODELS = True  # or CACHE_INFO = True
+
 Usage:
-    # Run with default settings (uses three_modules_run_policy)
+    # Simply run the script after configuring the global variables
     python policy_inference.py
-    
-    # List available models
-    python policy_inference.py --list_models
-    
-    # Use a different model from registry
-    python policy_inference.py --model another_model
-    
-    # Use a local policy file
-    python policy_inference.py --policy_path ./trained_policy.pkl
-    
-    # Download from a custom URL
-    python policy_inference.py --model_url https://example.com/policy.pkl
-    
-    # Customize simulation settings
-    python policy_inference.py --num_steps 500 --render_mode mp4 --seed 123
 """
 
-import argparse
 import sys
 import time
 from pathlib import Path
@@ -41,112 +47,44 @@ import numpy as np
 
 from metamachine.utils.checkpoint_manager import CheckpointManager
 
+# Configuration - modify these variables to change behavior
+# Model loading options (use only one at a time)
+MODEL = "three_modules_run_policy"  # Name of registered model to load
+POLICY_PATH = None  # Path to local policy file (.pkl)
+MODEL_URL = None  # Direct URL to download model from
+
+# Checkpoint manager options
+LIST_MODELS = False  # List all registered models and exit
+CACHE_INFO = False  # Show checkpoint cache information and exit
+FORCE_DOWNLOAD = False  # Force re-download of model even if cached
+
+# Environment and simulation settings
+CONFIG = "example_three_modules"  # Environment configuration name
+NUM_STEPS = 1000  # Number of simulation steps to run
+SEED = 42  # Random seed for reproducibility
+RENDER_MODE = "viewer"  # Rendering mode: "viewer", "mp4", or "none"
+DEVICE = "cpu"  # Device to run policy on: "cpu" or "cuda"
+PRINT_INTERVAL = 20  # Print progress every N steps
+VERBOSE = False  # Print observation values at each step
+
 # Lazy import of optional dependencies
 CrossQ = None
 ConfigRegistry = None
 MetaMachine = None
 
 
-def parse_args():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Run policy inference in MetaMachine environment"
-    )
-    
-    # Model loading options (mutually exclusive)
-    model_group = parser.add_mutually_exclusive_group()
-    model_group.add_argument(
-        "--model",
-        type=str,
-        default="three_modules_run_policy",
-        help="Name of registered model to load (default: three_modules_run_policy)",
-    )
-    model_group.add_argument(
-        "--policy_path",
-        type=str,
-        help="Path to local policy file (.pkl)",
-    )
-    model_group.add_argument(
-        "--model_url",
-        type=str,
-        help="Direct URL to download model from",
-    )
-    
-    # Checkpoint manager options
-    parser.add_argument(
-        "--list_models",
-        action="store_true",
-        help="List all registered models and exit",
-    )
-    parser.add_argument(
-        "--cache_info",
-        action="store_true",
-        help="Show checkpoint cache information and exit",
-    )
-    parser.add_argument(
-        "--force_download",
-        action="store_true",
-        help="Force re-download of model even if cached",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="example_three_modules",
-        help="Environment configuration name (default: example_three_modules)",
-    )
-    parser.add_argument(
-        "--num_steps",
-        type=int,
-        default=1000,
-        help="Number of simulation steps to run (default: 1000)",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility (default: 42)",
-    )
-    parser.add_argument(
-        "--render_mode",
-        type=str,
-        default="viewer",
-        choices=["viewer", "mp4", "none"],
-        help="Rendering mode (default: viewer)",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cpu",
-        choices=["cpu", "cuda"],
-        help="Device to run policy on (default: cpu)",
-    )
-    parser.add_argument(
-        "--print_interval",
-        type=int,
-        default=20,
-        help="Print progress every N steps (default: 20)",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Print observation values at each step",
-    )
-    return parser.parse_args()
-
 
 def main():
     """Main function to run policy inference."""
-    args = parse_args()
-    
     # Initialize checkpoint manager
     checkpoint_manager = CheckpointManager()
     
     # Handle info commands (don't require CapyRL)
-    if args.list_models:
+    if LIST_MODELS:
         checkpoint_manager.print_models()
         return
     
-    if args.cache_info:
+    if CACHE_INFO:
         checkpoint_manager.print_cache_info()
         return
     
@@ -164,24 +102,24 @@ def main():
     
     # Resolve model path
     try:
-        if args.policy_path:
+        if POLICY_PATH:
             # Local file
-            model_path = Path(args.policy_path)
+            model_path = Path(POLICY_PATH)
             if not model_path.exists():
-                print(f"Error: Policy file not found: {args.policy_path}")
+                print(f"Error: Policy file not found: {POLICY_PATH}")
                 return
             print(f"Using local policy file: {model_path}")
-        elif args.model_url:
+        elif MODEL_URL:
             # Direct URL
             model_path = checkpoint_manager.download_from_url(
-                args.model_url,
-                force_download=args.force_download,
+                MODEL_URL,
+                force_download=FORCE_DOWNLOAD,
             )
         else:
             # Registered model (default or specified)
             model_path = checkpoint_manager.get_checkpoint(
-                args.model,
-                force_download=args.force_download,
+                MODEL,
+                force_download=FORCE_DOWNLOAD,
             )
     except Exception as e:
         print(f"Error resolving model: {e}")
@@ -190,27 +128,27 @@ def main():
     # Load the trained policy
     print(f"\nLoading policy from: {model_path}")
     try:
-        model = CrossQ.load_pkl(str(model_path), env=None, device=args.device)
+        model = CrossQ.load_pkl(str(model_path), env=None, device=DEVICE)
         print("Policy loaded successfully!")
     except Exception as e:
         print(f"Error loading policy: {e}")
         return
 
     # Create environment configuration
-    print(f"Creating environment with config: {args.config}")
-    cfg = ConfigRegistry.create_from_name(args.config)
+    print(f"Creating environment with config: {CONFIG}")
+    cfg = ConfigRegistry.create_from_name(CONFIG)
 
     # Initialize the MetaMachine simulation environment
     env = MetaMachine(cfg)
-    env.render_mode = args.render_mode
+    env.render_mode = RENDER_MODE
 
     # Reset environment to initial state
-    print(f"Resetting environment with seed: {args.seed}")
-    obs, _ = env.reset(seed=args.seed)
+    print(f"Resetting environment with seed: {SEED}")
+    obs, _ = env.reset(seed=SEED)
 
     # Main control loop
-    print(f"Starting inference for {args.num_steps} steps...")
-    for step in range(args.num_steps):
+    print(f"Starting inference for {NUM_STEPS} steps...")
+    for step in range(NUM_STEPS):
         t0 = time.time()
 
         # Get action from policy
@@ -220,16 +158,16 @@ def main():
         obs, reward, done, truncated, info = env.step(action[0])
 
         # Print observation if verbose mode is enabled
-        if args.verbose:
+        if VERBOSE:
             print(f"Step {step} - Observation: {obs}")
 
         # Render the current state
         env.render()
 
         # Print progress at specified intervals
-        if step % args.print_interval == 0:
+        if step % PRINT_INTERVAL == 0:
             print(
-                f"Step {step}/{args.num_steps}: "
+                f"Step {step}/{NUM_STEPS}: "
                 f"reward={reward:.3f}, done={done}, truncated={truncated}"
             )
 

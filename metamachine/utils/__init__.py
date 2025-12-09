@@ -10,7 +10,14 @@ from .checkpoint_manager import (
     get_default_manager,
 )
 
+from .rollout_recorder import (
+    RolloutRecorder,
+    EpisodeData,
+    StateSnapshot,
+)
+
 __all__ = [
+    # Checkpoint manager
     "CheckpointManager",
     "get_checkpoint",
     "download_from_url",
@@ -18,4 +25,8 @@ __all__ = [
     "list_models",
     "print_models",
     "get_default_manager",
+    # Rollout recorder
+    "RolloutRecorder",
+    "EpisodeData",
+    "StateSnapshot",
 ]

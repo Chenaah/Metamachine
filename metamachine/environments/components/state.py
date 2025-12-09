@@ -1192,6 +1192,122 @@ class State:
         except AttributeError:
             return default
 
+    def get_full_state(self, components: list[str] | None = None) -> dict[str, Any]:
+        """Get full/privileged state data for recording or analysis.
+
+        This method provides access to the complete state information that
+        may be different from what the policy observes. Useful for recording
+        rollouts with privileged information.
+
+        Args:
+            components: List of component names to include. If None, returns
+                all available state data.
+
+        Returns:
+            Dictionary mapping component names to their values.
+
+        Example:
+            # Get specific components for recording
+            state_data = state.get_full_state([
+                "pos_world", "vel_world", "dof_pos", "dof_vel"
+            ])
+
+            # Get all available state data
+            all_state = state.get_full_state()
+        """
+        if components is None:
+            # Return all available data
+            return self.get_all_data()
+
+        result = {}
+        for comp_name in components:
+            value = self._get_state_component(comp_name)
+            if value is not None:
+                result[comp_name] = value
+
+        return result
+
+    def _get_state_component(self, comp_name: str) -> Any:
+        """Get a specific state component by name.
+
+        Args:
+            comp_name: Name of the component to retrieve.
+
+        Returns:
+            The component value, or None if not found.
+        """
+        # Check OBSERVATION_COMPONENTS registry
+        if comp_name in self.OBSERVATION_COMPONENTS:
+            try:
+                return self.OBSERVATION_COMPONENTS[comp_name](self)
+            except Exception:
+                pass
+
+        # Try direct attribute access
+        if hasattr(self, comp_name):
+            return getattr(self, comp_name)
+
+        # Try raw state
+        if hasattr(self.raw, comp_name):
+            return getattr(self.raw, comp_name)
+
+        # Try derived state
+        if hasattr(self.derived, comp_name):
+            return getattr(self.derived, comp_name)
+
+        # Try accurate state
+        if hasattr(self.accurate, comp_name):
+            return getattr(self.accurate, comp_name)
+
+        # Try observable_data
+        if hasattr(self, 'observable_data') and comp_name in self.observable_data:
+            return self.observable_data[comp_name]
+
+        return None
+
+    def get_full_state_vector(self, components: list[str] | None = None) -> np.ndarray:
+        """Get full/privileged state as a flattened vector.
+
+        Similar to get_full_state but returns a single numpy array with
+        all components concatenated and flattened.
+
+        Args:
+            components: List of component names to include. If None, uses
+                default privileged components.
+
+        Returns:
+            Flattened numpy array of state values.
+        """
+        if components is None:
+            # Default privileged components
+            components = [
+                "pos_world",
+                "quat",
+                "vel_world",
+                "vel_body",
+                "ang_vel_world",
+                "ang_vel_body",
+                "dof_pos",
+                "dof_vel",
+                "projected_gravity",
+                "height",
+                "heading",
+                "speed",
+            ]
+
+        parts = []
+        for comp_name in components:
+            value = self._get_state_component(comp_name)
+            if value is not None:
+                if isinstance(value, np.ndarray):
+                    parts.append(value.flatten())
+                elif isinstance(value, (list, tuple)):
+                    parts.append(np.array(value).flatten())
+                elif isinstance(value, (int, float)):
+                    parts.append(np.array([value]))
+
+        return np.concatenate(parts) if parts else np.array([])
+
     @classmethod
     def register_observation_component(cls, name: str, data_fn: Callable):
         """Register a new observation component.
