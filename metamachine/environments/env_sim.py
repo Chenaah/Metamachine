@@ -256,6 +256,7 @@ class MetaMachine(Base, MujocoEnv):
         factory = robot_factory.get_robot_factory(
             robot_type,
             sim_cfg=self.cfg.simulation,  # type: ignore
+            log_dir=self._log_dir,  # Pass the environment's log directory
             **get_default_fine_model_cfg(robot_type),
         )
         if factory is None:
@@ -267,7 +268,7 @@ class MetaMachine(Base, MujocoEnv):
         # }
 
         # Create robot using the new factory interface
-        robot = factory.create_robot(morphology=morphology)
+        robot = factory.create_robot(morphology=morphology, log_dir=self._log_dir)
 
         # Validate the robot
         is_valid, errors = robot.validate()
@@ -320,6 +321,7 @@ class MetaMachine(Base, MujocoEnv):
         draft_factory = robot_factory.get_robot_factory(
             robot_type,
             sim_cfg=self.cfg.simulation,  # type: ignore
+            log_dir=self._log_dir,  # Pass the environment's log directory
             **get_default_draft_model_cfg(robot_type),
         )
 
@@ -332,7 +334,7 @@ class MetaMachine(Base, MujocoEnv):
         # }
 
         # Create robot using the new factory interface
-        draft_robot = draft_factory.create_robot(morphology=morphology)
+        draft_robot = draft_factory.create_robot(morphology=morphology, log_dir=self._log_dir)
 
         # Validate the robot
         is_valid, errors = draft_robot.validate()

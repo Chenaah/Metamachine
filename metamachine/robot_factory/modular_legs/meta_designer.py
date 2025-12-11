@@ -50,6 +50,7 @@ class ModularLegs:
         mesh_dict=MESH_DICT_FINE,
         broken_mask=None,
         sim_cfg=None,
+        log_dir=None,
     ):
         """Initialize the ModularLegs instance."""
         self.robot_cfg = robot_cfg.copy()
@@ -63,6 +64,7 @@ class ModularLegs:
             else [0] * 100000
         )
         self.sim_cfg = sim_cfg
+        self.log_dir = log_dir if log_dir is not None else "debug"
 
         # Convert legacy pipeline to RobotMorphology if needed
         if is_list_like(morphology):
@@ -409,23 +411,20 @@ class ModularLegs:
             self.designer.builder.change_color_name("r", dark_grey)
             self.designer.builder.change_color_name("s", dark_grey)
 
-    def save(self, save_dir):
+    def save(self, save_dir=None):
         """Save the robot design to specified directory.
 
         Args:
-            save_dir (str): Directory to save the design
-            fix (bool): Whether to fix the robot position. Defaults to True.
-            pos (tuple): Initial position (x,y,z). Defaults to (0,0,0.4).
-            quat (list): Initial orientation quaternion. Defaults to [1,0,0,0].
-            joint_pos (list, optional): Initial joint positions. Defaults to None.
-            render (bool): Whether to render the robot. Defaults to False.
+            save_dir (str, optional): Directory to save the design. If None, uses self.log_dir.
         """
+        if save_dir is None:
+            save_dir = self.log_dir
         self.paint("black")
         self.designer.save(save_dir)
 
     def get_string(self):
         self.paint("black")
-        self.save("debug")
+        self.save()  # Will use self.log_dir (defaults to "debug" if not set)
         return self.designer.get_string()
 
     def render(self, fix=False, pos=(0, 0, 0.4), quat=None, joint_pos=None):

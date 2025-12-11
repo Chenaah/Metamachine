@@ -62,6 +62,7 @@ class ModularLegsRobot(BaseRobot):
         mesh_dict = self.config.get("mesh_dict", MESH_DICT_FINE)
         broken_mask = self.config.get("broken_mask", None)
         sim_cfg = self.config.get("sim_cfg", None)
+        log_dir = self.config.get("log_dir", kwargs.get("log_dir", None))
 
         # Create the underlying ModularLegs instance
         self._modular_legs = LegacyModularLegs(
@@ -70,6 +71,7 @@ class ModularLegsRobot(BaseRobot):
             mesh_dict=mesh_dict,
             broken_mask=broken_mask,
             sim_cfg=sim_cfg,
+            log_dir=log_dir,
         )
 
         # Track additional state
@@ -311,6 +313,7 @@ class ModularLegsFactory(BaseRobotFactory):
         robot_cfg: Optional[dict[str, Any]] = None,
         mesh_dict: Optional[dict[str, str]] = None,
         sim_cfg: Optional[dict[str, Any]] = None,
+        log_dir: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -319,6 +322,8 @@ class ModularLegsFactory(BaseRobotFactory):
         Args:
             robot_cfg: Robot configuration parameters
             mesh_dict: Mesh dictionary for component rendering
+            sim_cfg: Simulation configuration parameters
+            log_dir: Directory for logging and saving outputs
             **kwargs: Additional factory parameters
         """
         super().__init__(
@@ -329,6 +334,7 @@ class ModularLegsFactory(BaseRobotFactory):
                 "robot_cfg": robot_cfg or ROBOT_CFG_AIR1S,
                 "mesh_dict": mesh_dict or MESH_DICT_FINE,
                 "sim_cfg": sim_cfg,
+                "log_dir": log_dir,
             },
             supported_morphologies=["RobotMorphology", "list", "sequence"],
             **kwargs,
