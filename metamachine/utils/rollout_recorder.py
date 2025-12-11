@@ -46,6 +46,7 @@ class EpisodeData:
     """Container for a single episode's recorded data."""
     
     observations: List[np.ndarray] = field(default_factory=list)
+    env_observations: List[np.ndarray] = field(default_factory=list)  # Environment obs (what policy sees)
     actions: List[np.ndarray] = field(default_factory=list)
     rewards: List[float] = field(default_factory=list)
     dones: List[bool] = field(default_factory=list)
@@ -54,7 +55,9 @@ class EpisodeData:
     component_data: Dict[str, List[Any]] = field(default_factory=dict)  # For separate components
     
     def __len__(self) -> int:
-        return len(self.observations) or len(next(iter(self.component_data.values()), []))
+        return (len(self.observations) or 
+                len(self.env_observations) or 
+                len(next(iter(self.component_data.values()), [])))
     
     def to_dict(self, include_observations: bool = True) -> Dict[str, Any]:
         """Convert episode data to dictionary format.
@@ -67,6 +70,9 @@ class EpisodeData:
         
         if include_observations and self.observations:
             result["observations"] = np.array(self.observations)
+        
+        if self.env_observations:
+            result["env_observations"] = np.array(self.env_observations)
         
         if self.actions:
             result["actions"] = np.array(self.actions)
@@ -130,6 +136,7 @@ class RolloutRecorder:
         custom_extractors: Optional[Dict[str, Callable]] = None,
         separate_components: bool = True,
         action_as_actuator_command: bool = False,
+        include_env_obs: bool = False,
     ):
         """Initialize the rollout recorder.
         
@@ -151,6 +158,10 @@ class RolloutRecorder:
             action_as_actuator_command: If True, records action + default_dof_pos
                 (the final position command sent to actuators). If False (default),
                 records the raw policy action.
+            include_env_obs: If True, records the actual environment observation
+                (what the policy sees) as 'env_observations'. This is obtained by
+                calling state.get_observation(). Useful for comparing policy input
+                vs privileged state components.
                 
         Example:
             >>> # Store each component separately (recommended for analysis)
@@ -160,12 +171,13 @@ class RolloutRecorder:
             ... )
             >>> # Result: traj.keys() = ['gyros', 'dof_pos', 'dof_vel', 'actions', ...]
             
-            >>> # Record final actuator commands instead of raw actions
+            >>> # Record both privileged state and policy observation
             >>> recorder = RolloutRecorder(
-            ...     recording_components=["dof_pos"],
-            ...     action_as_actuator_command=True,
+            ...     recording_components=["pos_world", "vel_world"],  # privileged
+            ...     include_env_obs=True,  # policy observation
+            ...     separate_components=True,
             ... )
-            >>> # actions will contain: action + default_dof_pos
+            >>> # Result: traj.keys() = ['pos_world', 'vel_world', 'env_observations', 'actions', ...]
         """
         self.recording_components = recording_components or self.DEFAULT_RECORDING_COMPONENTS
         self.include_actions = include_actions
@@ -174,6 +186,7 @@ class RolloutRecorder:
         self.custom_extractors = custom_extractors or {}
         self.separate_components = separate_components
         self.action_as_actuator_command = action_as_actuator_command
+        self.include_env_obs = include_env_obs
         
         # Cache for default_dof_pos (will be set on first record)
         self._default_dof_pos = None
@@ -230,6 +243,12 @@ class RolloutRecorder:
             # Store all components concatenated into observations
             obs = self._extract_observation(state)
             self.current_episode.observations.append(obs)
+        
+        # Record environment observation (what policy sees) if requested
+        if self.include_env_obs:
+            env_obs = self._extract_env_observation(state)
+            if env_obs is not None:
+                self.current_episode.env_observations.append(env_obs)
         
         # Record action if requested
         if self.include_actions and action is not None:
@@ -394,6 +413,36 @@ class RolloutRecorder:
         # Try observable_data
         if hasattr(state, 'observable_data') and comp_name in state.observable_data:
             return state.observable_data[comp_name]
+        
+        return None
+    
+    def _extract_env_observation(self, state: Any) -> Optional[np.ndarray]:
+        """Extract the environment observation (what the policy sees).
+        
+        Args:
+            state: The State object from the environment.
+            
+        Returns:
+            Environment observation array or None if not available.
+        """
+        # Try to get observation from state
+        if hasattr(state, 'get_observation'):
+            try:
+                # Call get_observation with insert=False to avoid modifying the buffer
+                obs = state.get_observation(insert=False)
+                return obs.copy() if obs is not None else None
+            except Exception as e:
+                print(f"Warning: Failed to get environment observation: {e}")
+                return None
+        
+        # Fallback: try obs_buf directly
+        if hasattr(state, 'obs_buf') and hasattr(state.obs_buf, 'get_obs_vec'):
+            try:
+                obs = state.obs_buf.get_obs_vec()
+                return obs.copy() if obs is not None else None
+            except Exception as e:
+                print(f"Warning: Failed to get observation from obs_buf: {e}")
+                return None
         
         return None
     

@@ -64,7 +64,7 @@ POLICY_PATH = None  # Path to local policy file (.pkl)
 CONFIG = "example_three_modules"  # Environment configuration name
 
 # Recording options
-NUM_EPISODES = 3  # Number of episodes to record
+NUM_EPISODES = 1000  # Number of episodes to record
 MAX_STEPS = 1000  # Maximum steps per episode
 OUTPUT = "rollouts.npz"  # Output file path
 OUTPUT_FORMAT = "npz"  # Output format: "npz", "pkl", or "hdf5"
@@ -155,6 +155,7 @@ def main():
         include_actions=True,
         include_rewards=True,
         include_infos=False,  # Set to True if you want full info dicts
+        include_env_obs=True,  # Set to True if you want to record environment observations
         custom_extractors=create_custom_extractors(),
         action_as_actuator_command=True
     )
