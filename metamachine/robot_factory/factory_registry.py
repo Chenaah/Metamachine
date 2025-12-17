@@ -4,6 +4,12 @@ This module provides a centralized system for registering, discovering, and
 instantiating robot factories. It supports both built-in and custom factories
 with validation and capability discovery.
 
+The registry also supports a plugin system for dynamic factory loading,
+allowing factories to be:
+- Loaded from separate directories/packages
+- Enabled/disabled at runtime
+- Kept private/separate from the main codebase
+
 Copyright 2025 Chen Yu <chenyu@u.northwestern.edu>
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,7 +30,7 @@ import inspect
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from metamachine.robot_factory.modular_legs.constants import (
     MESH_DICT_DRAFT,
@@ -33,6 +39,9 @@ from metamachine.robot_factory.modular_legs.constants import (
 )
 
 from .base_factory import BaseRobotFactory, RobotType
+
+if TYPE_CHECKING:
+    from .plugin_loader import PluginLoader
 
 logger = logging.getLogger(__name__)
 
@@ -412,8 +421,8 @@ class RobotFactoryRegistry:
 
     def _register_builtin_factories(self):
         """Register built-in factories."""
+        # Register ModularLegs factory
         try:
-            # Import and register the existing ModularLegs factory
             from .modular_legs.modular_legs_factory import ModularLegsFactory
 
             # Register standard modular legs
@@ -423,7 +432,7 @@ class RobotFactoryRegistry:
                 robot_type=RobotType.MODULAR_LEGS,
                 priority=FactoryPriority.HIGH,
                 description="Standard modular legs robot factory",
-                tags=["modular", "legs", "standard"],
+                tags=["modular", "legs", "standard", "tree"],
                 default_kwargs={},
             )
 
@@ -437,7 +446,7 @@ class RobotFactoryRegistry:
                 robot_type=RobotType.MODULAR_LEGS,
                 priority=FactoryPriority.HIGH,
                 description="Draft modular legs robot factory",
-                tags=["modular", "legs", "draft"],
+                tags=["modular", "legs", "draft", "tree"],
                 default_kwargs={},
             )
 
@@ -449,6 +458,58 @@ class RobotFactoryRegistry:
 
 # Global registry instance
 _registry = RobotFactoryRegistry()
+
+# Plugin loader instance (lazy initialized)
+_plugin_loader: Optional["PluginLoader"] = None
+
+
+def get_plugin_loader() -> "PluginLoader":
+    """
+    Get the global plugin loader instance.
+    
+    Returns:
+        The global PluginLoader instance
+    """
+    global _plugin_loader
+    
+    if _plugin_loader is None:
+        from .plugin_loader import PluginLoader
+        _plugin_loader = PluginLoader(_registry, auto_load_builtin=True)
+    
+    return _plugin_loader
+
+
+def load_plugins_from(path: str) -> dict[str, bool]:
+    """
+    Load factory plugins from a directory.
+    
+    This allows you to keep some factories in separate directories
+    that can be easily included or excluded from releases.
+    
+    Args:
+        path: Directory containing plugin packages
+        
+    Returns:
+        Dict mapping plugin names to success status
+        
+    Example:
+        >>> # Load private factories from a separate directory
+        >>> load_plugins_from("/path/to/private/factories")
+        {'my_private_factory': True}
+    """
+    loader = get_plugin_loader()
+    loader.add_plugin_directory(path)
+    return loader.load_all_plugins()
+
+
+def list_plugins() -> list[dict]:
+    """
+    List all known plugins and their status.
+    
+    Returns:
+        List of plugin information dictionaries
+    """
+    return get_plugin_loader().list_plugins()
 
 
 def get_robot_factory(name: str, **kwargs) -> Optional[BaseRobotFactory]:

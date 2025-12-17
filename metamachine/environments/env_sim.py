@@ -668,6 +668,8 @@ class MetaMachine(Base, MujocoEnv):
 
     def _should_record_episode(self) -> bool:
         """Check if current episode should be recorded based on interval."""
+        if self.video_record_interval is None or self.video_record_interval <= 0:
+            return False
         return (
             self.episode_counter + 1
         ) % self.video_record_interval == 0 or self.episode_counter == 0

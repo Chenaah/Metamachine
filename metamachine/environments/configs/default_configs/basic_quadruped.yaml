@@ -82,6 +82,11 @@ control:
 observation:
   # Observation components (unified from both configs)
   torso_node_id: 0         # Reference node for observations/rewards
+  
+  # ============================================================
+  # FLAT OBSERVATION MODE (default)
+  # ============================================================
+  # Standard observation: all components concatenated into single vector
   components:
     - name: projected_gravity
     - name: ang_vel_body
@@ -89,6 +94,44 @@ observation:
       transform: cos
     - name: dof_vel
     - name: last_action
+
+  # ============================================================
+  # MODULAR OBSERVATION MODE (optional)
+  # ============================================================
+  # Enable this section to create per-module observations like:
+  #   obs = []
+  #   for i in range(N_MODULES):
+  #       module_obs = np.concatenate([
+  #           s.projected_gravities[i],
+  #           s.gyros[i],
+  #           s.dof_pos[i:i+1],
+  #           s.dof_vel[i:i+1]
+  #       ])
+  #       obs.append(module_obs)
+  #   obs = np.concatenate(obs)
+  #
+  # modular:
+  #   enabled: true
+  #   num_modules: 5          # Number of modules, or "auto" to detect from num_actions
+  #   
+  #   # Per-module components (repeated for each module)
+  #   per_module_components:
+  #     - name: projected_gravities   # List-type: use index_type: element
+  #       index_type: element         # Access as data[i]
+  #     - name: gyros
+  #       index_type: element
+  #     - name: dof_pos               # Array-type: use index_type: slice
+  #       index_type: slice           # Access as data[i*size:(i+1)*size]
+  #       slice_size: 1               # Size of each slice (default: 1)
+  #       transform: cos              # Optional transform
+  #     - name: dof_vel
+  #       index_type: slice
+  #       slice_size: 1
+  #   
+  #   # Global components (added once at the end, not per-module)
+  #   global_components:
+  #     - name: last_action
+  #     - name: commands
 
   # Observation processing
   clip_observations: 100.0 # Unified value

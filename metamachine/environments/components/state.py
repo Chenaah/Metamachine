@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 from dataclasses import dataclass, field
+import pdb
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -69,8 +70,8 @@ class RawState:
         self.dof_vel = np.zeros(num_dof)
 
         # Sensor data
-        self.gyros = None
-        self.accs = None
+        self.gyros = np.zeros((num_dof, 3))
+        self.accs = np.zeros((num_dof, 3))
 
         # Contact information
         self.contact_floor_balls = []
@@ -155,9 +156,14 @@ class DerivedState:
 
     height: np.ndarray = field(default_factory=lambda: np.zeros(1))
     projected_gravity: np.ndarray = field(default_factory=lambda: np.zeros(3))
-    projected_gravities: list[np.ndarray] = field(default_factory=list)
+    projected_gravities: np.ndarray = field(default_factory=lambda: np.zeros((1, 3)))
     heading: np.ndarray = field(default_factory=lambda: np.zeros(1))
     speed: np.ndarray = field(default_factory=lambda: np.zeros(1))
+
+    def __init__(self, num_dof: int = 1) -> None:
+        """Initialize DerivedState with specified number of degrees of freedom."""
+        self.projected_gravities = np.zeros((num_dof, 3))
+        self.projected_gravity = np.zeros(3)
 
     def __post_init__(self) -> None:
         """Store initial shapes for validation."""
@@ -209,6 +215,82 @@ class ObservationComponent:
         """Get the component data and apply any transformations."""
         data = self.data_fn(state)
         return self.transform_fn(data)
+
+
+class ModularObservationComponent:
+    """A component for modular observations that accesses indexed data per module.
+    
+    This component allows building observations where each module gets its own
+    slice of the data, enabling patterns like:
+    
+        obs = []
+        for i in range(N_MODULES):
+            module_obs = np.concatenate([
+                s.projected_gravities[i],
+                s.gyros[i],
+                s.dof_pos[i:i+1],
+                s.dof_vel[i:i+1]
+            ])
+            obs.append(module_obs)
+        obs = np.concatenate(obs)
+    """
+
+    def __init__(
+        self,
+        name: str,
+        data_fn: Callable,
+        index_type: str = "element",
+        slice_size: int = 1,
+        transform_fn: Optional[Callable] = None
+    ):
+        """Initialize modular observation component.
+
+        Args:
+            name: Name of the component
+            data_fn: Function that returns the component data (list or array)
+            index_type: How to index the data:
+                - "element": Use data[i] (for lists of arrays like projected_gravities)
+                - "slice": Use data[i*size:(i+1)*size] (for flat arrays like dof_pos)
+            slice_size: Size of each slice when index_type is "slice" (default: 1)
+            transform_fn: Optional function to transform the data
+        """
+        self.name = name
+        self.data_fn = data_fn
+        self.index_type = index_type
+        self.slice_size = slice_size
+        self.transform_fn = transform_fn if transform_fn else lambda x: x
+
+    def get_data_for_module(self, state, module_idx: int) -> np.ndarray:
+        """Get the component data for a specific module index.
+        
+        Args:
+            state: The State object
+            module_idx: Index of the module (0-indexed)
+            
+        Returns:
+            numpy.ndarray: Data for the specified module
+        """
+        data = self.data_fn(state)
+        
+        if self.index_type == "element":
+            # Access as list element: data[i]
+            try:
+                indexed_data = data[module_idx]
+            except IndexError:
+                import pdb; pdb.set_trace()
+        elif self.index_type == "slice":
+            # Access as array slice: data[i*size:(i+1)*size]
+            start_idx = module_idx * self.slice_size
+            end_idx = start_idx + self.slice_size
+            indexed_data = data[start_idx:end_idx]
+        else:
+            raise ValueError(f"Unknown index_type: {self.index_type}")
+        
+        # Ensure numpy array
+        if not isinstance(indexed_data, np.ndarray):
+            indexed_data = np.array(indexed_data)
+            
+        return self.transform_fn(indexed_data)
 
 
 class ActionHistoryBuffer:
@@ -443,6 +525,21 @@ class State:
         "com_vel_world": lambda s: getattr(s, "com_vel_world", np.zeros(3)),
     }
 
+    # Define available modular observation components (for per-module observations)
+    # These components support indexed access for modular robot architectures
+    MODULAR_OBSERVATION_COMPONENTS = {
+        # List-type components (use index_type: "element")
+        "projected_gravities": lambda s: s.derived.projected_gravities,
+        "gyros": lambda s: s.raw.gyros,
+        "accs": lambda s: s.raw.accs,
+        "quats": lambda s: s.raw.quats,
+        # Array-type components (use index_type: "slice")
+        "dof_pos": lambda s: s.raw.dof_pos,
+        "dof_vel": lambda s: s.raw.dof_vel,
+        "last_action": lambda s: s.action_history.last_action,
+        "last_last_action": lambda s: s.action_history.last_last_action,
+    }
+
     # Define common transformations
     TRANSFORMATIONS = {
         "cos": np.cos,
@@ -462,6 +559,7 @@ class State:
             cfg: Configuration object that includes:
                 - observation_components: List of components to include
                 - observation_transforms: Dict of component transforms
+                - observation.modular: Optional modular observation config
         """
         self.cfg = cfg
 
@@ -477,7 +575,7 @@ class State:
 
         # State containers
         self.raw = RawState(num_dof=self.num_act)
-        self.derived = DerivedState()
+        self.derived = DerivedState(num_dof=self.num_act)
         self.accurate = AccurateState()  # Only used in simulation environments
 
         # Action history
@@ -508,7 +606,13 @@ class State:
         # Initialize reward-related state
         self.reset_reward_state()
 
-        # Set up observation components
+        # Modular observation settings
+        self.modular_mode = False
+        self.num_modules = 0
+        self.modular_components = []  # Per-module components
+        self.global_components = []   # Global components (added once)
+
+        # Set up observation components (flat or modular)
         self.observation_components = []
         self._setup_observation_components()
 
@@ -612,6 +716,11 @@ class State:
                 "fly_counter",
                 "jump_timer",
                 "vel_filter",
+                # Modular observation attributes
+                "modular_mode",
+                "num_modules",
+                "modular_components",
+                "global_components",
             ]
             or not hasattr(self, "raw")
             or not hasattr(self, "derived")
@@ -641,7 +750,23 @@ class State:
             super().__setattr__(name, value)
 
     def _setup_observation_components(self) -> None:
-        """Set up observation components based on config."""
+        """Set up observation components based on config.
+        
+        Supports two modes:
+        1. Flat mode (default): Standard observation components concatenated
+        2. Modular mode: Per-module observations repeated for each module
+        
+        Modular mode is enabled by setting observation.modular.enabled = true
+        """
+        # Check if modular mode is enabled
+        modular_cfg = getattr(self.cfg.observation, "modular", None)
+        if modular_cfg is not None and getattr(modular_cfg, "enabled", False):
+            self._setup_modular_observation_components(modular_cfg)
+        else:
+            self._setup_flat_observation_components()
+
+    def _setup_flat_observation_components(self) -> None:
+        """Set up standard flat observation components."""
         # Get observation components from config
         if not hasattr(self.cfg.observation, "components"):
             # Default observation components if not specified
@@ -671,49 +796,140 @@ class State:
                 raise ValueError(f"Unknown observation component: {comp_name}")
             data_fn = self.OBSERVATION_COMPONENTS[comp_name]
 
-            # Build transform function chain
-            def transform_fn(x):
-                return x  # Identity transform by default
-
-            if "transform" in comp_spec:
-                if isinstance(comp_spec["transform"], str):
-                    # Single transform
-                    transform_name = comp_spec["transform"]
-                    if transform_name not in self.TRANSFORMATIONS:
-                        raise ValueError(f"Unknown transform: {transform_name}")
-                    transform_fn = self.TRANSFORMATIONS[transform_name]
-                elif isinstance(comp_spec["transform"], list):
-                    # Chain of transforms
-                    transforms = []
-                    for t in comp_spec["transform"]:
-                        if isinstance(t, str):
-                            if t not in self.TRANSFORMATIONS:
-                                raise ValueError(f"Unknown transform: {t}")
-                            transforms.append(self.TRANSFORMATIONS[t])
-                        elif isinstance(t, dict):
-                            # Transform with parameters
-                            t_name = t["name"]
-                            if t_name not in self.TRANSFORMATIONS:
-                                raise ValueError(f"Unknown transform: {t_name}")
-                            t_params = {k: v for k, v in t.items() if k != "name"}
-                            transforms.append(
-                                lambda x, fn=self.TRANSFORMATIONS[
-                                    t_name
-                                ], params=t_params: fn(x, **params)
-                            )
-
-                    # Create transform chain
-                    def chain_transform(x, transforms=transforms):
-                        for t in transforms:
-                            x = t(x)
-                        return x
-
-                    transform_fn = chain_transform
+            # Build transform function
+            transform_fn = self._build_transform_fn(comp_spec)
 
             # Create and add component
             self.observation_components.append(
                 ObservationComponent(comp_name, data_fn, transform_fn)
             )
+
+    def _setup_modular_observation_components(self, modular_cfg) -> None:
+        """Set up modular observation components for per-module observations.
+        
+        This enables observation patterns like:
+            obs = []
+            for i in range(N_MODULES):
+                module_obs = np.concatenate([
+                    s.projected_gravities[i],
+                    s.gyros[i],
+                    s.dof_pos[i:i+1],
+                    s.dof_vel[i:i+1]
+                ])
+                obs.append(module_obs)
+            obs = np.concatenate(obs)
+        
+        Args:
+            modular_cfg: Configuration for modular observations with:
+                - num_modules: Number of modules (or "auto" to detect)
+                - per_module_components: List of per-module component specs
+                - global_components: Optional list of global component specs
+        """
+        self.modular_mode = True
+        
+        # Get number of modules
+        num_modules = getattr(modular_cfg, "num_modules", "auto")
+        if num_modules == "auto":
+            # Auto-detect from num_actions (assuming 1 action per module)
+            self.num_modules = self.num_act
+        else:
+            self.num_modules = int(num_modules)
+        
+        # Set up per-module components
+        per_module_specs = getattr(modular_cfg, "per_module_components", [])
+        for comp_spec in per_module_specs:
+            comp_spec = self._normalize_component_spec(comp_spec)
+            comp_name = comp_spec["name"]
+            
+            # Get data function from modular components registry
+            if comp_name not in self.MODULAR_OBSERVATION_COMPONENTS:
+                raise ValueError(
+                    f"Unknown modular observation component: {comp_name}. "
+                    f"Available: {list(self.MODULAR_OBSERVATION_COMPONENTS.keys())}"
+                )
+            data_fn = self.MODULAR_OBSERVATION_COMPONENTS[comp_name]
+            
+            # Get indexing type and slice size
+            index_type = comp_spec.get("index_type", "element")
+            slice_size = comp_spec.get("slice_size", 1)
+            
+            # Build transform function
+            transform_fn = self._build_transform_fn(comp_spec)
+            # Create modular component
+            self.modular_components.append(
+                ModularObservationComponent(
+                    comp_name, data_fn, index_type, slice_size, transform_fn
+                )
+            )
+        
+        # Set up global components (added once, not per-module)
+        global_specs = getattr(modular_cfg, "global_components", [])
+        for comp_spec in global_specs:
+            comp_spec = self._normalize_component_spec(comp_spec)
+            comp_name = comp_spec["name"]
+            
+            if comp_name not in self.OBSERVATION_COMPONENTS:
+                raise ValueError(f"Unknown observation component: {comp_name}")
+            data_fn = self.OBSERVATION_COMPONENTS[comp_name]
+            
+            transform_fn = self._build_transform_fn(comp_spec)
+            
+            self.global_components.append(
+                ObservationComponent(comp_name, data_fn, transform_fn)
+            )
+
+    def _normalize_component_spec(self, comp_spec) -> dict:
+        """Normalize component specification to dictionary format."""
+        if isinstance(comp_spec, str):
+            return {"name": comp_spec}
+        elif isinstance(comp_spec, (list, tuple)):
+            if len(comp_spec) >= 2:
+                return {"name": comp_spec[0], "transform": comp_spec[1]}
+            return {"name": comp_spec[0]}
+        return dict(comp_spec) if hasattr(comp_spec, "items") else comp_spec
+
+    def _build_transform_fn(self, comp_spec) -> Callable:
+        """Build transform function from component specification."""
+        def identity(x):
+            return x
+        
+        if "transform" not in comp_spec or comp_spec.get("transform") is None:
+            return identity
+        
+        transform_spec = comp_spec["transform"]
+        
+        if isinstance(transform_spec, str):
+            # Single transform
+            if transform_spec not in self.TRANSFORMATIONS:
+                raise ValueError(f"Unknown transform: {transform_spec}")
+            return self.TRANSFORMATIONS[transform_spec]
+        
+        elif isinstance(transform_spec, list):
+            # Chain of transforms
+            transforms = []
+            for t in transform_spec:
+                if isinstance(t, str):
+                    if t not in self.TRANSFORMATIONS:
+                        raise ValueError(f"Unknown transform: {t}")
+                    transforms.append(self.TRANSFORMATIONS[t])
+                elif isinstance(t, dict):
+                    # Transform with parameters
+                    t_name = t["name"]
+                    if t_name not in self.TRANSFORMATIONS:
+                        raise ValueError(f"Unknown transform: {t_name}")
+                    t_params = {k: v for k, v in t.items() if k != "name"}
+                    transforms.append(
+                        lambda x, fn=self.TRANSFORMATIONS[t_name], params=t_params: fn(x, **params)
+                    )
+            
+            def chain_transform(x, transforms=transforms):
+                for t in transforms:
+                    x = t(x)
+                return x
+            
+            return chain_transform
+        
+        return identity
 
     def reset(self) -> None:
         """Reset state variables."""
@@ -967,11 +1183,27 @@ class State:
 
         Returns:
             numpy.ndarray: Raw observation vector
+            
+        Supports two modes:
+        1. Flat mode: Standard concatenation of all observation components
+        2. Modular mode: Per-module observations repeated for each module,
+           followed by global components
+        """
+        if self.modular_mode:
+            return self._construct_modular_observation()
+        else:
+            return self._construct_flat_observation()
+
+    def _construct_flat_observation(self):
+        """Construct flat observation vector (standard mode).
+        
+        Returns:
+            numpy.ndarray: Raw observation vector
         """
         obs_parts = []
         for component in self.observation_components:
             data = component.get_data(self)
-            flattened_data = data.flatten()
+            flattened_data = np.asarray(data).flatten()
 
             # Check for NaN values in this component
             if np.any(np.isnan(flattened_data)):
@@ -979,14 +1211,10 @@ class State:
                 print(
                     f"WARNING: NaN detected in observation component '{component.name}'"
                 )
-                print(f"  Original data shape: {data.shape}")
+                print(f"  Original data shape: {np.asarray(data).shape}")
                 print(f"  Flattened data shape: {flattened_data.shape}")
                 print(f"  NaN indices: {nan_indices}")
                 print(f"  Data sample: {flattened_data[:min(10, len(flattened_data))]}")
-
-                # Optionally replace NaN with zeros (uncomment if desired)
-                # flattened_data = np.nan_to_num(flattened_data, nan=0.0)
-                # print(f"  Replaced NaN values with zeros")
 
             obs_parts.append(flattened_data)
 
@@ -1002,11 +1230,136 @@ class State:
             )
             print(f"Step counter: {self.step_counter}")
 
-            # Optionally replace all NaN with zeros in final observation
-            # observation = np.nan_to_num(observation, nan=0.0)
-            # print("Replaced all NaN values in final observation with zeros")
-
         return observation
+
+    def _construct_modular_observation(self):
+        """Construct modular observation vector (per-module mode).
+        
+        Generates observations in the pattern:
+            obs = []
+            for i in range(N_MODULES):
+                module_obs = np.concatenate([
+                    component.get_data_for_module(state, i)
+                    for component in per_module_components
+                ])
+                obs.append(module_obs)
+            obs.append(global_obs)  # Global components added once
+            obs = np.concatenate(obs)
+        
+        Returns:
+            numpy.ndarray: Raw observation vector with modular structure
+        """
+        obs_parts = []
+        
+        # Per-module observations
+        for module_idx in range(self.num_modules):
+            module_obs_parts = []
+            for component in self.modular_components:
+                try:
+                    data = component.get_data_for_module(self, module_idx)
+                    flattened_data = np.asarray(data).flatten()
+                    
+                    # Check for NaN values
+                    if np.any(np.isnan(flattened_data)):
+                        print(
+                            f"WARNING: NaN in modular component '{component.name}' "
+                            f"for module {module_idx}"
+                        )
+                    
+                    module_obs_parts.append(flattened_data)
+                except (IndexError, TypeError) as e:
+                    print(
+                        f"ERROR: Failed to get data for component '{component.name}' "
+                        f"at module index {module_idx}: {e}"
+                    )
+                    raise
+            
+            if module_obs_parts:
+                obs_parts.append(np.concatenate(module_obs_parts))
+        
+        # Global observations (added once at the end)
+        for component in self.global_components:
+            data = component.get_data(self)
+            flattened_data = np.asarray(data).flatten()
+            
+            if np.any(np.isnan(flattened_data)):
+                print(
+                    f"WARNING: NaN in global component '{component.name}'"
+                )
+            
+            obs_parts.append(flattened_data)
+        
+        # Concatenate all parts
+        if not obs_parts:
+            return np.array([])
+        
+        observation = np.concatenate(obs_parts)
+        
+        # Final NaN check
+        if np.any(np.isnan(observation)):
+            nan_count = np.sum(np.isnan(observation))
+            total_count = len(observation)
+            print(
+                f"ERROR: Modular observation contains {nan_count}/{total_count} NaN values!"
+            )
+            print(f"Step counter: {self.step_counter}")
+        
+        return observation
+
+    def get_modular_observation_info(self) -> dict:
+        """Get information about the modular observation structure.
+        
+        Returns:
+            Dictionary with modular observation details including:
+            - modular_mode: Whether modular mode is enabled
+            - num_modules: Number of modules
+            - per_module_obs_size: Size of observation per module
+            - global_obs_size: Size of global observations
+            - total_obs_size: Total observation size
+            - component_names: Names of components in order
+        """
+        if not self.modular_mode:
+            return {
+                "modular_mode": False,
+                "num_modules": 0,
+                "per_module_obs_size": 0,
+                "global_obs_size": self.num_obs,
+                "total_obs_size": self.num_obs,
+                "component_names": [c.name for c in self.observation_components],
+            }
+        
+        # Calculate per-module observation size
+        per_module_size = 0
+        per_module_names = []
+        for comp in self.modular_components:
+            # Get sample data for module 0 to determine size
+            try:
+                sample = comp.get_data_for_module(self, 0)
+                per_module_size += np.asarray(sample).flatten().shape[0]
+                per_module_names.append(comp.name)
+            except Exception:
+                pass
+        
+        # Calculate global observation size
+        global_size = 0
+        global_names = []
+        for comp in self.global_components:
+            try:
+                sample = comp.get_data(self)
+                global_size += np.asarray(sample).flatten().shape[0]
+                global_names.append(comp.name)
+            except Exception:
+                pass
+        
+        return {
+            "modular_mode": True,
+            "num_modules": self.num_modules,
+            "per_module_obs_size": per_module_size,
+            "global_obs_size": global_size,
+            "total_obs_size": per_module_size * self.num_modules + global_size,
+            "per_module_components": per_module_names,
+            "global_components": global_names,
+        }
 
     def get_custom_commands(self, command_type):
         """Get custom commands based on command type."""
@@ -1335,6 +1688,36 @@ class State:
         cls.OBSERVATION_COMPONENTS[name] = data_fn
 
     @classmethod
+    def register_modular_observation_component(cls, name: str, data_fn: Callable):
+        """Register a new modular observation component.
+
+        Args:
+            name: Component name for configuration
+            data_fn: Function that takes a state object and returns indexable data
+                    (list of arrays for "element" index_type, or array for "slice")
+
+        Example:
+            # Register custom per-module sensor data
+            def custom_module_sensors(state):
+                return state.raw.custom_sensors  # List of arrays per module
+
+            State.register_modular_observation_component('custom_sensors', custom_module_sensors)
+
+            # Use in configuration:
+            observation:
+              modular:
+                enabled: true
+                num_modules: 5
+                per_module_components:
+                  - name: custom_sensors
+                    index_type: element
+        """
+        if not callable(data_fn):
+            raise ValueError("data_fn must be callable")
+
+        cls.MODULAR_OBSERVATION_COMPONENTS[name] = data_fn
+
+    @classmethod
     def register_transformation(cls, name: str, transform_fn: Callable):
         """Register a new transformation function.
 
@@ -1370,6 +1753,15 @@ class State:
         return list(cls.OBSERVATION_COMPONENTS.keys())
 
     @classmethod
+    def list_modular_observation_components(cls) -> list[str]:
+        """Get list of all available modular observation component names.
+
+        Returns:
+            List of component names that can be used in modular configurations
+        """
+        return list(cls.MODULAR_OBSERVATION_COMPONENTS.keys())
+
+    @classmethod
     def list_transformations(cls) -> list[str]:
         """Get list of all available transformation names.
 
@@ -1397,6 +1789,23 @@ def register_observation_component(name: str, data_fn: Callable):
     State.register_observation_component(name, data_fn)
 
 
+def register_modular_observation_component(name: str, data_fn: Callable):
+    """Register a new modular observation component.
+
+    Args:
+        name: Component name for configuration
+        data_fn: Function that takes a state object and returns indexable data
+
+    Example:
+        # Register custom per-module sensor data
+        def custom_module_sensors(state):
+            return state.raw.custom_sensors  # List of arrays per module
+
+        register_modular_observation_component('custom_sensors', custom_module_sensors)
+    """
+    State.register_modular_observation_component(name, data_fn)
+
+
 def register_transformation(name: str, transform_fn: Callable):
     """Register a new transformation function.
 
@@ -1417,6 +1826,11 @@ def register_transformation(name: str, transform_fn: Callable):
 def list_observation_components() -> list[str]:
     """Get list of all available observation component names."""
     return State.list_observation_components()
+
+
+def list_modular_observation_components() -> list[str]:
+    """Get list of all available modular observation component names."""
+    return State.list_modular_observation_components()
 
 
 def list_transformations() -> list[str]:

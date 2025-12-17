@@ -44,6 +44,14 @@ class CheckpointManager:
             "config": "example_three_modules",
             "description": "Running policy for three-module configuration",
         },
+
+
+        "quadruped_run_policy": {
+            "url": "https://drive.google.com/uc?export=download&id=1FYNwe5PDMARQQ07_zBZRWKh4uGohdFC8",
+            "md5": None,
+            "config": "basic_quadruped",
+            "description": "Running policy for basic quadruped",
+        }
         # Add more models here following this pattern:
         # "model_name": {
         #     "url": "https://your-storage.com/model.pkl",

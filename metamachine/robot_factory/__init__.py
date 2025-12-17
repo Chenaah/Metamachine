@@ -1,7 +1,32 @@
 """
 Metamachine Robot Factory Module
+
 This module provides the core functionality for generating MuJoCo XML files
 from modular robot configurations using a modern factory pattern.
+
+Built-in factory:
+- **modular_legs**: Tree-based morphology using sequential module connections
+
+Plugin factories (load separately):
+- **lego_legs**: Graph-based morphology using weld constraints between components
+
+All factories share a unified API through the BaseRobotFactory interface.
+
+Quick Start:
+    # Using the registry (recommended)
+    >>> from metamachine.robot_factory import get_robot_factory
+    >>> factory = get_robot_factory("modular_legs")
+    >>> robot = factory.create_robot(...)
+    
+    # Using graph-based morphology
+    >>> from metamachine.robot_factory.morphology import create_tripod_graph
+    >>> morphology = create_tripod_graph()
+
+Plugin System:
+    Factories can be loaded as plugins from external directories:
+    >>> from metamachine.robot_factory import load_plugins_from
+    >>> load_plugins_from("/path/to/private_plugins")
+    >>> factory = get_robot_factory("lego_legs")  # Now available!
 
 Copyright 2025 Chen Yu <chenyu@u.northwestern.edu>
 
@@ -10,18 +35,12 @@ you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 """
 
 # Import base classes for custom factory development
 from .base_factory import BaseRobot, BaseRobotFactory, RobotSpec, RobotType
 
-# Import the new factory system
+# Import the factory registry system
 from .factory_registry import (
     get_factories_by_type,
     get_registry,
@@ -29,6 +48,18 @@ from .factory_registry import (
     list_factories,
     register_factory,
     search_factories,
+    load_plugins_from,
+    list_plugins,
+)
+
+# Import morphology classes (unified graph-based representation)
+from .morphology import (
+    ComponentSpec,
+    ComponentType,
+    Connection,
+    RobotGraph,
+    create_tripod_graph,
+    create_quadruped_graph,
 )
 
 # Legacy compatibility imports
@@ -46,12 +77,22 @@ __all__ = [
     "get_factories_by_type",
     "search_factories",
     "get_registry",
+    # Plugin system
+    "load_plugins_from",
+    "list_plugins",
     # Base classes
     "BaseRobotFactory",
     "BaseRobot",
     "RobotType",
     "RobotSpec",
-    # Specific factories
+    # Morphology classes
+    "ComponentSpec",
+    "ComponentType",
+    "Connection",
+    "RobotGraph",
+    "create_tripod_graph",
+    "create_quadruped_graph",
+    # ModularLegs factory
     "ModularLegsFactory",
     "ModularLegsRobot",
     # Legacy compatibility
@@ -79,13 +120,11 @@ def get_robot_factory_legacy(factory_name: str = "modular_legs"):
     legacy_mapping = {
         "modular_legs": "modular_legs",
         "mini_modular_legs": "mini_modular_legs",
+        "lego_legs": "lego_legs",
     }
 
     new_name = legacy_mapping.get(factory_name)
     if new_name is None:
         raise ValueError(f"Unknown factory name: {factory_name}")
 
-    get_robot_factory(new_name)
-
-    # For regular modular_legs, return the legacy ModularLegs
-    return ModularLegs
+    return get_robot_factory(new_name)

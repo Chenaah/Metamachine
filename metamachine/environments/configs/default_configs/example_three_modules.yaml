@@ -7,7 +7,7 @@ _base: basic_quadruped  # Inherit from basic_quadruped.yaml
 morphology:
   robot_type: modular_legs    # Robot type (modular_legs for basic usage)
   configuration: [ 0,1,0,0,    # [Parent module ID, parent position ID, child position ID, rotation ID]
-               0,3,0,0,]
+                   0,3,0,0,]
 
 
 # Control Interface
