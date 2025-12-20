@@ -30,6 +30,7 @@ except Exception:
     os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 
 # Note: optimize_pose is imported conditionally when needed to avoid JAX dependency issues
+import pdb
 from typing import Any, Optional, Union
 
 # from gymnasium.envs.mujoco import MujocoEnv
@@ -252,6 +253,9 @@ class MetaMachine(Base, MujocoEnv):
         self, robot_type: Any, morphology: Any
     ) -> None:
         """Load robot asset from morphology using the new factory system."""
+        import tempfile
+        import os
+        
         # Get the factory using the new registry system
         factory = robot_factory.get_robot_factory(
             robot_type,
@@ -262,11 +266,6 @@ class MetaMachine(Base, MujocoEnv):
         if factory is None:
             raise ValueError(f"Unknown robot factory type: {robot_type}")
 
-        # # Prepare configuration for robot creation
-        # robot_config = {
-        #     'sim_cfg': OmegaConf.to_container(self.sim_cfg) if self.sim_cfg else None
-        # }
-
         # Create robot using the new factory interface
         robot = factory.create_robot(morphology=morphology, log_dir=self._log_dir)
 
@@ -275,43 +274,69 @@ class MetaMachine(Base, MujocoEnv):
         if not is_valid:
             print(f"Warning: Robot validation failed: {errors}")
 
-        # Get the XML string
-        self.xml_string = robot.get_xml_string()
-
         # Store robot instance for potential future use
         self._robot_instance = robot
         
-        # Create XMLCompiler from the generated XML for randomization support
-        # This enables mass/damping randomization for morphology-based robots
-        import tempfile
-        import os
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
-            f.write(self.xml_string)
-            temp_xml_path = f.name
+        # Check if restructure is enabled (for lego_legs or other graph-based robots)
+        restructure = getattr(self.cfg.morphology, "restructure", False)
+        restructure_qpos = getattr(self.cfg.morphology, "restructure_qpos", None)
         
-        try:
-            self.xml_compiler = XMLCompiler(temp_xml_path)
+        if restructure and hasattr(robot, "save"):
+            # Save to temp file with restructuring
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
+                temp_xml_path = f.name
             
-            # Setup mass range if mass randomization is enabled
-            randomization_cfg = getattr(self.cfg, "randomization", {})
-            mass_cfg = randomization_cfg.get("mass", {})
-            mass_enabled = mass_cfg.get("enabled", False)
+            # Convert restructure_qpos from OmegaConf if needed
+            if restructure_qpos is not None:
+                from omegaconf import DictConfig, ListConfig, OmegaConf
+                if isinstance(restructure_qpos, (DictConfig, ListConfig)):
+                    restructure_qpos = OmegaConf.to_container(restructure_qpos, resolve=True)
             
-            # Fallback to old style for backward compatibility
-            if not mass_enabled:
-                mass_enabled = self.sim_cfg.get("randomize_mass", False)
+            # Save with restructure
+            saved_path = robot.save(
+                temp_xml_path,
+                restructure=True,
+                restructure_qpos=restructure_qpos,
+            )
             
-            if mass_enabled:
-                # Get percentage from new or old config
-                mass_percentage = mass_cfg.get("percentage", None)
-                if mass_percentage is None:
-                    mass_percentage = self.sim_cfg.get("random_mass_percentage", 0.1)
-                
-                self.mass_range = self.xml_compiler.get_mass_range(mass_percentage)
-        finally:
-            # Clean up temporary file
-            if os.path.exists(temp_xml_path):
-                os.unlink(temp_xml_path)
+            # Read the restructured XML
+            with open(saved_path, 'r') as f:
+                self.xml_string = f.read()
+            
+            # Create XMLCompiler from the restructured file
+            self.xml_compiler = XMLCompiler(saved_path)
+        else:
+            # Get the XML string directly (no restructure)
+            self.xml_string = robot.get_xml_string()
+            
+            # Create XMLCompiler from the generated XML for randomization support
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
+                f.write(self.xml_string)
+                temp_xml_path = f.name
+            
+            try:
+                self.xml_compiler = XMLCompiler(temp_xml_path)
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_xml_path):
+                    os.unlink(temp_xml_path)
+        
+        # Setup mass range if mass randomization is enabled
+        randomization_cfg = getattr(self.cfg, "randomization", {})
+        mass_cfg = randomization_cfg.get("mass", {})
+        mass_enabled = mass_cfg.get("enabled", False)
+        
+        # Fallback to old style for backward compatibility
+        if not mass_enabled:
+            mass_enabled = self.sim_cfg.get("randomize_mass", False)
+        
+        if mass_enabled:
+            # Get percentage from new or old config
+            mass_percentage = mass_cfg.get("percentage", None)
+            if mass_percentage is None:
+                mass_percentage = self.sim_cfg.get("random_mass_percentage", 0.1)
+            
+            self.mass_range = self.xml_compiler.get_mass_range(mass_percentage)
 
     def _load_draft_robot_asset_from_morphology(
         self, robot_type: Any, morphology: Any
@@ -902,6 +927,7 @@ class MetaMachine(Base, MujocoEnv):
         Returns:
             Action execution information
         """
+
         # Apply external forces
         if self.external_forces_enabled:
             self._handle_external_forces()

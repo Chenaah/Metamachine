@@ -819,13 +819,28 @@ class State:
                 obs.append(module_obs)
             obs = np.concatenate(obs)
         
+        When main_module_index is set, it creates a single-module observation:
+            obs = np.concatenate([
+                s.projected_gravities[i],  # Only main module
+                s.gyros[i],                # Only main module
+                s.dof_pos,                 # ALL (global)
+                s.dof_vel,                 # ALL (global)
+                s.last_action              # ALL (global)
+            ])
+        
         Args:
             modular_cfg: Configuration for modular observations with:
                 - num_modules: Number of modules (or "auto" to detect)
+                - main_module_index: Optional index of main module. When set,
+                    per_module_components only use this single module index,
+                    creating a "main module + global" observation pattern.
                 - per_module_components: List of per-module component specs
                 - global_components: Optional list of global component specs
         """
         self.modular_mode = True
+        
+        # Check for main_module_index mode (single module + global pattern)
+        self.main_module_index = getattr(modular_cfg, "main_module_index", None)
         
         # Get number of modules
         num_modules = getattr(modular_cfg, "num_modules", "auto")
@@ -1246,13 +1261,27 @@ class State:
             obs.append(global_obs)  # Global components added once
             obs = np.concatenate(obs)
         
+        When main_module_index is set, generates:
+            obs = np.concatenate([
+                per_module_data_for_main_module,  # Only main module
+                global_obs                         # All global components
+            ])
+        
         Returns:
             numpy.ndarray: Raw observation vector with modular structure
         """
         obs_parts = []
         
+        # Determine which module indices to iterate over
+        if self.main_module_index is not None:
+            # Main module mode: only use the specified main module index
+            module_indices = [self.main_module_index]
+        else:
+            # Standard mode: iterate over all modules
+            module_indices = range(self.num_modules)
+        
         # Per-module observations
-        for module_idx in range(self.num_modules):
+        for module_idx in module_indices:
             module_obs_parts = []
             for component in self.modular_components:
                 try:

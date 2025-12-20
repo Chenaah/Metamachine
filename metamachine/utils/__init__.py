@@ -16,6 +16,13 @@ from .rollout_recorder import (
     StateSnapshot,
 )
 
+from .mujoco_utils import (
+    find_parent_torso,
+    get_all_weld_clusters,
+    get_largest_weld_cluster_average_pos,
+    get_weld_cluster_center_of_mass,
+)
+
 __all__ = [
     # Checkpoint manager
     "CheckpointManager",
@@ -29,4 +36,9 @@ __all__ = [
     "RolloutRecorder",
     "EpisodeData",
     "StateSnapshot",
+    # MuJoCo utilities
+    "find_parent_torso",
+    "get_all_weld_clusters",
+    "get_largest_weld_cluster_average_pos",
+    "get_weld_cluster_center_of_mass",
 ]

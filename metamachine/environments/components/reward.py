@@ -423,6 +423,97 @@ class ActionRateComponent(RewardComponent):
         return action_rate
 
 
+class WindowedDisplacementEfficiencyComponent(RewardComponent):
+    """
+    Windowed displacement efficiency reward for locomotion.
+    
+    This reward component tracks position over a sliding window and computes:
+    1. Speed: net displacement / time (how fast the robot moves toward its goal)
+    2. Efficiency: net displacement / path length (how straight the path is)
+    
+    The final reward combines speed and efficiency, encouraging both fast and
+    efficient locomotion without shaking or zigzagging.
+    
+    Parameters (in params dict):
+        window_size: Number of steps to track (default: 100)
+        speed_weight: Weight for speed component (default: 1.0)
+        efficiency_weight: Weight for efficiency component (default: 0.5)
+        use_weld_cluster: If True, use weld cluster average position; 
+                         if False, use accurate_pos_world (default: True)
+    
+    Example YAML configuration:
+        - name: windowed_efficiency
+          type: windowed_displacement_efficiency
+          weight: 1.0
+          params:
+            window_size: 100
+            speed_weight: 1.0
+            efficiency_weight: 0.5
+            use_weld_cluster: true
+    """
+
+    def __init__(self, name: str, weight: float = 1.0, **kwargs) -> None:
+        super().__init__(name, weight, **kwargs)
+        self.pos_history: list[np.ndarray] = []
+
+    def calculate(self, state, calculator) -> float:
+        window_size = self.params.get("window_size", 100)
+        speed_weight = self.params.get("speed_weight", 1.0)
+        efficiency_weight = self.params.get("efficiency_weight", 0.5)
+        use_weld_cluster = self.params.get("use_weld_cluster", True)
+        
+        # Get current position
+        if use_weld_cluster and state.mj_model is not None and state.mj_data is not None:
+            from ...utils.mujoco_utils import get_largest_weld_cluster_average_pos
+            
+            result = get_largest_weld_cluster_average_pos(state.mj_model, state.mj_data)
+            if result[1] is not None:
+                curr_pos = result[1][:2]  # Use only x, y coordinates
+            else:
+                # Fallback to accurate position if no weld cluster found
+                curr_pos = state.accurate_pos_world[:2].copy()
+        else:
+            # Use accurate position directly
+            curr_pos = state.accurate_pos_world[:2].copy()
+        
+        self.pos_history.append(curr_pos)
+        
+        # Clamp window length
+        if len(self.pos_history) > window_size:
+            self.pos_history.pop(0)
+        
+        # Need at least 2 points to compute anything
+        if len(self.pos_history) < 2:
+            return 0.0
+        
+        # Get earliest position in window
+        last_pos = self.pos_history[0]
+        
+        # Net displacement (straight-line distance from start to current)
+        disp = np.linalg.norm(curr_pos - last_pos)
+        
+        # Total path length traveled (accumulated movement)
+        path_len = sum(
+            np.linalg.norm(self.pos_history[i + 1] - self.pos_history[i])
+            for i in range(len(self.pos_history) - 1)
+        )
+        
+        # Speed = net displacement / time
+        time_elapsed = calculator.dt * len(self.pos_history)
+        speed = disp / time_elapsed if time_elapsed > 0 else 0.0
+        
+        # Efficiency = how straight / non-shaky the path is (0 to 1)
+        efficiency = disp / (path_len + 1e-6)
+        
+        # Final reward: weighted combination of speed and efficiency
+        reward = speed_weight * speed + efficiency_weight * efficiency
+        
+        return reward
+
+    def reset(self) -> None:
+        self.pos_history = []
+
+
 # Component registry for easy lookup
 COMPONENT_REGISTRY = {
     "linear_velocity_tracking": LinearVelocityTrackingComponent,
@@ -445,6 +536,7 @@ COMPONENT_REGISTRY = {
     "jump_timer": JumpTimerComponent,
     "tripod_jump": TripodJumpComponent,
     "action_rate": ActionRateComponent,
+    "windowed_displacement_efficiency": WindowedDisplacementEfficiencyComponent,
 }
 
 

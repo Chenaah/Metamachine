@@ -614,12 +614,20 @@ def get_default_fine_model_cfg(robot_type: RobotType) -> dict[str, Any]:
     if (
         robot_type == RobotType.MODULAR_LEGS
         or robot_type == RobotType.MODULAR_LEGS.value
+        or robot_type == "modular_legs"
     ):
         return {"robot_cfg": ROBOT_CFG_AIR1S, "mesh_dict": MESH_DICT_FINE}
+    elif (
+        robot_type == RobotType.CUSTOM
+        or robot_type == RobotType.CUSTOM.value
+        or robot_type == "lego_legs"
+    ):
+        # For lego_legs and other custom types, let the factory use its own defaults
+        return {}
     else:
-        raise ValueError(
-            f"Unsupported robot type for fine model configuration: {robot_type}"
-        )
+        # For unknown types, return empty dict to let factory use defaults
+        logger.warning(f"No fine model config for robot type: {robot_type}, using factory defaults")
+        return {}
 
 
 def get_default_draft_model_cfg(robot_type: RobotType) -> dict[str, Any]:
@@ -635,9 +643,17 @@ def get_default_draft_model_cfg(robot_type: RobotType) -> dict[str, Any]:
     if (
         robot_type == RobotType.MODULAR_LEGS
         or robot_type == RobotType.MODULAR_LEGS.value
+        or robot_type == "modular_legs"
     ):
         return {"robot_cfg": ROBOT_CFG_AIR1S, "mesh_dict": MESH_DICT_DRAFT}
+    elif (
+        robot_type == RobotType.CUSTOM
+        or robot_type == RobotType.CUSTOM.value
+        or robot_type == "lego_legs"
+    ):
+        # For lego_legs and other custom types, let the factory use its own defaults
+        return {}
     else:
-        raise ValueError(
-            f"Unsupported robot type for draft model configuration: {robot_type}"
-        )
+        # For unknown types, return empty dict to let factory use defaults
+        logger.warning(f"No draft model config for robot type: {robot_type}, using factory defaults")
+        return {}

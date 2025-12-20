@@ -28,27 +28,32 @@ class KBHit:
 
     Provides methods for non-blocking keyboard input detection and character reading.
     Automatically handles platform differences between Windows and POSIX systems.
+    Falls back to no-op mode when no TTY is available (e.g., running in scripts).
     """
 
     def __init__(self) -> None:
         """Initialize KBHit object and set up platform-specific terminal settings."""
+        self._is_tty = True  # Flag to track if we have a valid TTY
 
         if os.name == "nt":
             pass
 
         else:
+            try:
+                # Save the terminal settings
+                self.fd = sys.stdin.fileno()
+                self.new_term = termios.tcgetattr(self.fd)
+                self.old_term = termios.tcgetattr(self.fd)
 
-            # Save the terminal settings
-            self.fd = sys.stdin.fileno()
-            self.new_term = termios.tcgetattr(self.fd)
-            self.old_term = termios.tcgetattr(self.fd)
+                # New terminal setting unbuffered
+                self.new_term[3] = self.new_term[3] & ~termios.ICANON & ~termios.ECHO
+                termios.tcsetattr(self.fd, termios.TCSAFLUSH, self.new_term)
 
-            # New terminal setting unbuffered
-            self.new_term[3] = self.new_term[3] & ~termios.ICANON & ~termios.ECHO
-            termios.tcsetattr(self.fd, termios.TCSAFLUSH, self.new_term)
-
-            # Support normal-terminal reset at exit
-            atexit.register(self.set_normal_term)
+                # Support normal-terminal reset at exit
+                atexit.register(self.set_normal_term)
+            except (termios.error, OSError):
+                # No TTY available (e.g., running in a script, CI, or non-interactive shell)
+                self._is_tty = False
 
     def set_normal_term(self) -> None:
         """Reset terminal to normal mode.
@@ -58,8 +63,7 @@ class KBHit:
 
         if os.name == "nt":
             pass
-
-        else:
+        elif self._is_tty:
             termios.tcsetattr(self.fd, termios.TCSAFLUSH, self.old_term)
 
     def getch(self) -> str:
@@ -111,7 +115,8 @@ class KBHit:
         """
         if os.name == "nt":
             return msvcrt.kbhit()  # type: ignore
-
+        elif not self._is_tty:
+            return False  # No TTY, so no keyboard input
         else:
             dr, dw, de = select([sys.stdin], [], [], 0)
             return dr != []
