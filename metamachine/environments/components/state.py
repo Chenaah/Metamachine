@@ -500,6 +500,9 @@ class State:
         "ang_vel_body": lambda s: s.raw.ang_vel_body,
         "dof_pos": lambda s: s.raw.dof_pos,
         "dof_vel": lambda s: s.raw.dof_vel,
+        # Masked joint observations (for robots with wheels or partial encoders)
+        "masked_dof_pos": lambda s: s.masked_dof_pos,
+        "masked_dof_vel": lambda s: s.masked_dof_vel,
         "gyros": lambda s: s.raw.gyros,
         "last_action": lambda s: s.action_history.last_action,
         "last_last_action": lambda s: s.action_history.last_last_action,
@@ -536,6 +539,9 @@ class State:
         # Array-type components (use index_type: "slice")
         "dof_pos": lambda s: s.raw.dof_pos,
         "dof_vel": lambda s: s.raw.dof_vel,
+        # Masked joint observations (for robots with wheels or partial encoders)
+        "masked_dof_pos": lambda s: s.masked_dof_pos,
+        "masked_dof_vel": lambda s: s.masked_dof_vel,
         "last_action": lambda s: s.action_history.last_action,
         "last_last_action": lambda s: s.action_history.last_last_action,
     }
@@ -577,6 +583,9 @@ class State:
         self.raw = RawState(num_dof=self.num_act)
         self.derived = DerivedState(num_dof=self.num_act)
         self.accurate = AccurateState()  # Only used in simulation environments
+
+        # Setup observation masking for joints (e.g., wheels without encoders)
+        self._setup_obs_masking(cfg)
 
         # Action history
         action_history_steps = getattr(
@@ -721,6 +730,9 @@ class State:
                 "num_modules",
                 "modular_components",
                 "global_components",
+                # Observation masking attributes
+                "dof_pos_mask",
+                "dof_vel_mask",
             ]
             or not hasattr(self, "raw")
             or not hasattr(self, "derived")
@@ -748,6 +760,86 @@ class State:
         # Otherwise, set it on State itself
         else:
             super().__setattr__(name, value)
+
+    def _setup_obs_masking(self, cfg: OmegaConf) -> None:
+        """Setup observation masking for joints without full encoder data.
+        
+        This is useful for robots with wheel joints where position encoder data
+        may be unavailable or meaningless (continuous rotation). Allows excluding
+        specific joints from dof_pos and/or dof_vel observations.
+        
+        Configuration example:
+            control:
+              obs_masking:
+                enabled: true
+                exclude_joints:
+                  dof_pos: [2, 4]  # Exclude joints 2 and 4 from dof_pos
+                  dof_vel: []      # Include all joints in dof_vel
+        """
+        obs_masking = getattr(cfg.control, 'obs_masking', None)
+        
+        if obs_masking and obs_masking.get('enabled', False):
+            exclude_cfg = obs_masking.get('exclude_joints', {})
+            self.dof_pos_mask = self._create_joint_mask(
+                exclude_cfg.get('dof_pos', []), self.num_act
+            )
+            self.dof_vel_mask = self._create_joint_mask(
+                exclude_cfg.get('dof_vel', []), self.num_act
+            )
+        else:
+            self.dof_pos_mask = None
+            self.dof_vel_mask = None
+    
+    def _create_joint_mask(
+        self, exclude_indices: list, num_joints: int
+    ) -> Optional[np.ndarray]:
+        """Create a boolean mask for joint observations.
+        
+        Args:
+            exclude_indices: List of joint indices to exclude
+            num_joints: Total number of joints
+            
+        Returns:
+            Boolean mask array where True = include, False = exclude.
+            Returns None if no joints are excluded.
+        """
+        if not exclude_indices:
+            return None
+        
+        # Validate indices
+        for idx in exclude_indices:
+            if idx >= num_joints:
+                raise ValueError(
+                    f"Exclude joint index {idx} >= num_joints {num_joints}"
+                )
+        
+        mask = np.ones(num_joints, dtype=bool)
+        mask[exclude_indices] = False
+        return mask
+    
+    @property
+    def masked_dof_pos(self) -> np.ndarray:
+        """Get dof_pos with excluded joints removed.
+        
+        Returns:
+            Joint positions with masked joints excluded. If no masking is
+            configured, returns the full dof_pos array.
+        """
+        if self.dof_pos_mask is None:
+            return self.raw.dof_pos
+        return self.raw.dof_pos[self.dof_pos_mask]
+    
+    @property
+    def masked_dof_vel(self) -> np.ndarray:
+        """Get dof_vel with excluded joints removed.
+        
+        Returns:
+            Joint velocities with masked joints excluded. If no masking is
+            configured, returns the full dof_vel array.
+        """
+        if self.dof_vel_mask is None:
+            return self.raw.dof_vel
+        return self.raw.dof_vel[self.dof_vel_mask]
 
     def _setup_observation_components(self) -> None:
         """Set up observation components based on config.

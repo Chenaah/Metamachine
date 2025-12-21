@@ -78,6 +78,50 @@ control:
     remap_type: null       # No remapping type specified
     remap_params: null     # No remap parameters specified
 
+  # ============================================================
+  # PER-JOINT CONTROL MODE (for mixed position/velocity control)
+  # ============================================================
+  # This feature allows different joints to use different control modes.
+  # Useful for robots with wheels (velocity-controlled) and legs (position-controlled).
+  #
+  # When a joint is configured as a "wheel":
+  #   - Its kp is set to 0 (no position tracking)
+  #   - Its kd is set higher (for velocity control)
+  #   - The action for that joint is interpreted as velocity target
+  #
+  per_joint_control:
+    enabled: false          # Enable per-joint control modes
+    
+    # Wheel joints configuration (velocity-controlled joints)
+    # These joints will have kp=0 and use velocity control
+    wheel_joints:
+      indices: []           # Joint indices that are wheels, e.g., [2, 4]
+      kd: 2.0               # kd for wheel joints (higher for velocity control)
+      default_velocity: 0.0 # Default target velocity when action is 0
+      action_scale: 1.0     # Optional: different action scale for wheel joints
+    
+    # Alternative: Fine-grained per-joint configuration
+    # If specified, these override global kp/kd and wheel_joints config
+    # per_joint_kp: [8.0, 8.0, 0.0, 8.0, 0.0]    # kp per joint
+    # per_joint_kd: [0.2, 0.2, 2.0, 0.2, 2.0]    # kd per joint
+    # per_joint_mode: ["position", "position", "velocity", "position", "velocity"]
+    per_joint_kp: null
+    per_joint_kd: null
+    per_joint_mode: null
+
+  # ============================================================
+  # OBSERVATION MASKING (for joints without full encoder data)
+  # ============================================================
+  # Useful for wheel joints where position encoder data may be unavailable
+  # or meaningless (continuous rotation). Allows excluding specific joints
+  # from dof_pos and/or dof_vel observations.
+  #
+  obs_masking:
+    enabled: false          # Enable observation masking
+    exclude_joints:
+      dof_pos: []           # Joint indices to exclude from dof_pos, e.g., [2, 4]
+      dof_vel: []           # Joint indices to exclude from dof_vel
+
 # State Observation
 observation:
   # Observation components (unified from both configs)

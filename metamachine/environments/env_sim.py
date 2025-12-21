@@ -320,6 +320,8 @@ class MetaMachine(Base, MujocoEnv):
                 # Clean up temporary file
                 if os.path.exists(temp_xml_path):
                     os.unlink(temp_xml_path)
+
+        self.xml_compiler.save(os.path.join(self._log_dir, "robot_debug.xml"))
         
         # Setup mass range if mass randomization is enabled
         randomization_cfg = getattr(self.cfg, "randomization", {})
@@ -790,9 +792,74 @@ class MetaMachine(Base, MujocoEnv):
             self.model.geom(f"left{i}").bodyid.item() for i in self.jointed_module_ids
         ]
 
-        # Setup PD gains
-        self.kps = np.full(self.num_act * self.num_envs, self.kp, dtype=np.float32)
-        self.kds = np.full(self.num_act * self.num_envs, self.kd, dtype=np.float32)
+        # Setup PD gains with per-joint control support
+        self._setup_pd_gains()
+
+    def _setup_pd_gains(self) -> None:
+        """Setup PD gains with optional per-joint configuration.
+        
+        This method supports:
+        1. Uniform gains (default): All joints use the same kp/kd
+        2. Wheel joints: Specific joints configured as velocity-controlled (kp=0, higher kd)
+        3. Fine-grained: Explicit per-joint kp/kd arrays
+        
+        For velocity-controlled joints (wheels), the action is interpreted as velocity target
+        rather than position offset.
+        """
+        per_joint_cfg = getattr(self.cfg.control, 'per_joint_control', None)
+        
+        if per_joint_cfg and per_joint_cfg.get('enabled', False):
+            # Initialize with global values
+            self.kps = np.full(self.num_act, self.kp, dtype=np.float32)
+            self.kds = np.full(self.num_act, self.kd, dtype=np.float32)
+            self.joint_control_modes = ['position'] * self.num_act
+            self.default_dof_vel = np.zeros(self.num_act, dtype=np.float32)
+            self.wheel_action_scale = 1.0
+            
+            # Apply wheel joints configuration
+            wheel_cfg = per_joint_cfg.get('wheel_joints', {})
+            wheel_indices = wheel_cfg.get('indices', [])
+            if wheel_indices:
+                wheel_kd = wheel_cfg.get('kd', 2.0)
+                default_vel = wheel_cfg.get('default_velocity', 0.0)
+                self.wheel_action_scale = wheel_cfg.get('action_scale', 1.0)
+                
+                for idx in wheel_indices:
+                    if idx >= self.num_act:
+                        raise ValueError(
+                            f"Wheel joint index {idx} >= num_actions {self.num_act}"
+                        )
+                    self.kps[idx] = 0.0  # No position control for wheels
+                    self.kds[idx] = wheel_kd
+                    self.joint_control_modes[idx] = 'velocity'
+                    self.default_dof_vel[idx] = default_vel
+            
+            # Override with explicit per-joint config if provided
+            if per_joint_cfg.get('per_joint_kp') is not None:
+                self.kps = np.array(per_joint_cfg.per_joint_kp, dtype=np.float32)
+            if per_joint_cfg.get('per_joint_kd') is not None:
+                self.kds = np.array(per_joint_cfg.per_joint_kd, dtype=np.float32)
+            if per_joint_cfg.get('per_joint_mode') is not None:
+                self.joint_control_modes = list(per_joint_cfg.per_joint_mode)
+                # Update default_dof_vel for velocity-controlled joints
+                for i, mode in enumerate(self.joint_control_modes):
+                    if mode == 'velocity' and i not in wheel_indices:
+                        self.default_dof_vel[i] = 0.0
+            
+            # Store wheel indices for later use
+            self.wheel_joint_indices = [
+                i for i, mode in enumerate(self.joint_control_modes) 
+                if mode == 'velocity'
+            ]
+        else:
+            # Original behavior: uniform gains for all joints
+            self.kps = np.full(self.num_act * self.num_envs, self.kp, dtype=np.float32)
+            self.kds = np.full(self.num_act * self.num_envs, self.kd, dtype=np.float32)
+            self.joint_control_modes = None
+            self.default_dof_vel = None
+            self.wheel_joint_indices = []
+            self.wheel_action_scale = 1.0
+
 
     def _initialize_control_state(self) -> None:
         """Initialize control state tracking."""
@@ -937,8 +1004,8 @@ class MetaMachine(Base, MujocoEnv):
         if latency_scheme >= 0 and self.frame_skip % 2 != 0:
             raise ValueError("frame_skip must be even for latency simulation")
 
-        # Add action noise if enabled
-        pos, vel = self._add_action_noise(action)
+        # Prepare control targets (separate position/velocity, add noise if enabled)
+        pos, vel = self._prepare_control_targets(action)
 
         # Record positions before action
         pos_before = self._record_positions()
@@ -979,15 +1046,40 @@ class MetaMachine(Base, MujocoEnv):
             if self.external_force_counter[i] >= duration:
                 self._reset_external_forces()
 
-    def _add_action_noise(self, action: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Add noise to actions if enabled.
+    def _prepare_control_targets(self, action: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Prepare position and velocity control targets from actions.
+        
+        This method:
+        1. Separates actions into position/velocity targets based on per-joint control modes
+        2. Adds noise if enabled
+        
+        For position-controlled joints:
+            - pos_target = action
+            - vel_target = 0
+            
+        For velocity-controlled joints (wheels):
+            - pos_target = 0 (will be multiplied by kp=0)
+            - vel_target = action * wheel_action_scale + default_velocity
 
+        Args:
+            action: Raw action array from action processor
+            
         Returns:
-            (position_action, velocity_action)
+            (pos_target, vel_target): Tuple of position and velocity targets
         """
         pos = action.copy()
         vel = np.zeros_like(pos)
 
+        # Handle per-joint control modes (position vs velocity)
+        if self.joint_control_modes is not None:
+            for i, mode in enumerate(self.joint_control_modes):
+                if mode == 'velocity':
+                    # For wheel joints: action is velocity target
+                    vel[i] = (action[i] * self.wheel_action_scale 
+                              + self.default_dof_vel[i])
+                    pos[i] = 0  # Position target is 0 (will be multiplied by kp=0)
+
+        # Add noise if enabled
         if self.sim_cfg.get("noisy_actions", False):
             noise_std = self.sim_cfg.action_noise_std
             pos += self.np_random.normal(0, noise_std, size=pos.shape)
@@ -1057,12 +1149,23 @@ class MetaMachine(Base, MujocoEnv):
         frame_skip: int,
         vel_desired: Optional[np.ndarray] = None,
     ) -> None:
-        """Execute PD control for joint positions.
+        """Execute PD control for joint positions with mixed control mode support.
+
+        For position-controlled joints:
+            torque = kp * (pos_desired - pos_current) + kd * (vel_desired - vel_current)
+        
+        For velocity-controlled joints (wheels):
+            torque = kd * (vel_target - vel_current)  (kp = 0)
+            
+        Note: The separation of actions into position/velocity targets for wheel
+        joints is handled in _prepare_control_targets(), which sets:
+        - pos_desired[i] = 0 for wheel joints (multiplied by kp=0)
+        - vel_desired[i] = velocity target for wheel joints
 
         Args:
-            pos_desired: Target joint positions
+            pos_desired: Target joint positions (0 for velocity-controlled joints)
             frame_skip: Number of simulation steps
-            vel_desired: Target joint velocities
+            vel_desired: Target joint velocities (velocity target for wheel joints)
         """
         if vel_desired is None:
             vel_desired = np.zeros_like(pos_desired)
@@ -1072,6 +1175,8 @@ class MetaMachine(Base, MujocoEnv):
         dof_vel = self.data.qvel[self.model.jnt_dofadr[self.joint_idx]]
 
         # Calculate PD torques
+        # For position joints: kp * (pos_error) + kd * (vel_error)
+        # For velocity joints: kp=0, so just kd * (vel_target - vel_current)
         torques = self.kps * (pos_desired - dof_pos) + self.kds * (
             vel_desired - dof_vel
         )
@@ -1112,7 +1217,12 @@ class MetaMachine(Base, MujocoEnv):
         frame_skip: int,
         vel_desired: Optional[np.ndarray] = None,
     ) -> None:
-        """Execute fine-grained PD control with per-step updates."""
+        """Execute fine-grained PD control with per-step updates.
+        
+        Supports mixed control modes (position/velocity) per joint.
+        The separation of actions into position/velocity targets is handled
+        in _prepare_control_targets().
+        """
         if vel_desired is None:
             vel_desired = np.zeros_like(pos_desired)
 
@@ -1476,8 +1586,19 @@ class MetaMachine(Base, MujocoEnv):
         if pd_cfg.get("enabled", False):
             self.kp = np.random.uniform(*pd_cfg.get("kp_range", [8.0, 8.0]))
             self.kd = np.random.uniform(*pd_cfg.get("kd_range", [0.2, 0.2]))
-            self.kps = np.full(self.num_act * self.num_envs, self.kp, dtype=np.float32)
-            self.kds = np.full(self.num_act * self.num_envs, self.kd, dtype=np.float32)
+            
+            # Preserve per-joint control settings when randomizing
+            if self.joint_control_modes is not None:
+                # Only randomize position-controlled joints
+                for i, mode in enumerate(self.joint_control_modes):
+                    if mode == 'position':
+                        self.kps[i] = self.kp
+                        self.kds[i] = self.kd
+                    # Velocity-controlled joints keep their original kd
+            else:
+                # Original behavior: uniform gains
+                self.kps = np.full(self.num_act * self.num_envs, self.kp, dtype=np.float32)
+                self.kds = np.full(self.num_act * self.num_envs, self.kd, dtype=np.float32)
 
         # Latency randomization
         if self.sim_cfg.get("random_latency_scheme", False):
