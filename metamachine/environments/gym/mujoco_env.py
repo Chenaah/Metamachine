@@ -99,20 +99,31 @@ class MujocoEnv(gym.Env):
         self.render_mode = render_mode
         self.camera_name = camera_name
         self.camera_id = camera_id
-
-        from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
-
-        self.mujoco_renderer = MujocoRenderer(
-            self.model,
-            self.data,
-            default_camera_config,
-            self.width,
-            self.height,
-            max_geom,
-            camera_id,
-            camera_name,
-            visual_options,
-        )
+        
+        # Store renderer config for lazy initialization
+        self._renderer_config = {
+            "default_camera_config": default_camera_config,
+            "max_geom": max_geom,
+            "visual_options": visual_options,
+        }
+        
+        # Only create renderer if actually needed (not for 'none' or custom modes like 'mp4')
+        # This prevents GPU resource leaks when rendering isn't used
+        if render_mode in ["human", "rgb_array", "depth_array"]:
+            from gymnasium.envs.mujoco.mujoco_rendering import MujocoRenderer
+            self.mujoco_renderer = MujocoRenderer(
+                self.model,
+                self.data,
+                default_camera_config,
+                self.width,
+                self.height,
+                max_geom,
+                camera_id,
+                camera_name,
+                visual_options,
+            )
+        else:
+            self.mujoco_renderer = None
 
     def _set_action_space(self) -> None:
         bounds = self.model.actuator_ctrlrange.copy().astype(np.float32)
@@ -162,15 +173,22 @@ class MujocoEnv(gym.Env):
         """
         Render a frame from the MuJoCo simulation as specified by the render_mode.
         """
+        if self.mujoco_renderer is None:
+            return None
         return self.mujoco_renderer.render(self.render_mode)
 
     def close(self) -> None:
         """Close rendering contexts processes."""
-        if self.mujoco_renderer is not None:
+        if hasattr(self, "mujoco_renderer") and self.mujoco_renderer is not None:
             print("Closing Mujoco Renderer")
-            if self.mujoco_renderer.viewer is not None:
-                self.mujoco_renderer.viewer.free()
-            self.mujoco_renderer.close()
+            try:
+                if hasattr(self.mujoco_renderer, "viewer") and self.mujoco_renderer.viewer is not None:
+                    self.mujoco_renderer.viewer.free()
+                self.mujoco_renderer.close()
+            except Exception as e:
+                print(f"Warning: Error closing MujocoRenderer: {e}")
+            finally:
+                self.mujoco_renderer = None
 
     def get_body_com(self, body_name):
         """Return the cartesian position of a body frame."""

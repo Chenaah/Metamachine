@@ -33,6 +33,31 @@ except Exception:
 import pdb
 from typing import Any, Optional, Union
 
+# Import debug utilities if available
+try:
+    from .debug_utils import (
+        debug_section,
+        debug_trace,
+        set_current_operation,
+        _DEBUG_ENABLED,
+    )
+    _HAS_DEBUG_UTILS = True
+except ImportError:
+    _HAS_DEBUG_UTILS = False
+    _DEBUG_ENABLED = False
+    def debug_section(name):
+        from contextlib import contextmanager
+        @contextmanager
+        def _noop():
+            yield
+        return _noop()
+    def debug_trace(name):
+        def decorator(func):
+            return func
+        return decorator
+    def set_current_operation(name):
+        pass
+
 # from gymnasium.envs.mujoco import MujocoEnv
 import cv2
 import mujoco
@@ -496,39 +521,23 @@ class MetaMachine(Base, MujocoEnv):
         self.egl_renderer: Optional[Union[str, Any]] = None
         self.recording_active = False
         print(
-            f"Video recording initialized. Recording every {self.video_record_interval} episodes with pattern: {self.video_name_pattern}"
+            f"Video recording initialized. Recording every {self.video_record_interval} episodes."
         )
 
     def _create_egl_renderer(self) -> Any:
         """Create EGL renderer for direct rendering."""
         if self.egl_renderer is None:
             try:
-                # Ensure EGL is properly set up
-                import os
-
-                old_gl = os.environ.get("MUJOCO_GL", "")
-                os.environ["MUJOCO_GL"] = "egl"
-
                 width, height = self.render_size
                 self.egl_renderer = mujoco.Renderer(
                     self.model, height=height, width=width
                 )
                 print(f"EGL renderer created ({width}x{height})")
-
-                # Get preferred camera for rendering
                 self.preferred_camera_id = self._get_preferred_camera()
-
-                # Restore previous GL setting if it existed
-                if old_gl:
-                    os.environ["MUJOCO_GL"] = old_gl
-
             except Exception as e:
                 print(f"Failed to create EGL renderer: {e}")
-                # Try alternative: use synthetic frames for headless environments
-                print("EGL rendering not available, using synthetic mode")
-                self.egl_renderer = (
-                    "synthetic"  # Special marker for synthetic rendering
-                )
+                print("Using synthetic rendering mode")
+                self.egl_renderer = "synthetic"
         return self.egl_renderer
 
     def _cleanup_egl_renderer(self) -> None:
@@ -611,21 +620,17 @@ class MetaMachine(Base, MujocoEnv):
         renderer = self._create_egl_renderer()
 
         if renderer == "synthetic":
-            # Create synthetic frame
             width, height = self.render_size
             frame = self._create_synthetic_frame(width, height)
         else:
-            # Use real EGL renderer with preferred camera
             camera_id = getattr(self, "preferred_camera_id", -1)
             renderer.update_scene(self.data, camera=camera_id)
             pixels = renderer.render()
-            # frame = (pixels * 255).astype(np.uint8)
             frame = 1 - pixels
             frame = (frame * 255).astype(np.uint8)
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
         frame = self._add_metrics_overlay(frame)
-
         self.video_frames.append(frame)
         return frame
 
@@ -637,28 +642,20 @@ class MetaMachine(Base, MujocoEnv):
 
         from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 
-        # Generate filename based on pattern
         filename = self._generate_video_filename()
 
-        # Create clip from frames with fps specified
         clip = ImageSequenceClip(list(self.video_frames), fps=self.video_fps)
-
-        # Write video file
         clip.write_videofile(
             filename,
             codec="libx264",
             fps=self.video_fps,
             audio=False,
-            logger=None,  # Suppress moviepy logging
+            logger=None,
         )
-
-        # Clean up
         clip.close()
 
         file_size = os.path.getsize(filename)
-        print(
-            f"✓ Video saved: {filename} ({file_size:,} bytes, {len(self.video_frames)} frames)"
-        )
+        print(f"✓ Video saved: {filename} ({file_size:,} bytes, {len(self.video_frames)} frames)")
         return True
 
     def _generate_video_filename(self) -> str:
@@ -1756,13 +1753,21 @@ class MetaMachine(Base, MujocoEnv):
 
     def reload_model(self, xml_string: str) -> None:
         """Reload MuJoCo model with new XML."""
-
         # Preserve render settings
         saved_render_mode = getattr(self, "render_mode", "none")
         saved_video_path = getattr(self, "video_path", "robot_video.mp4")
         saved_video_fps = getattr(self, "video_fps", 20)
         saved_recording_active = getattr(self, "recording_active", False)
         saved_video_frames = getattr(self, "video_frames", [])
+
+        # Clean up renderers before reloading
+        self._cleanup_egl_renderer()
+        if hasattr(self, "mujoco_renderer") and self.mujoco_renderer is not None:
+            try:
+                self.mujoco_renderer.close()
+            except Exception:
+                pass
+            self.mujoco_renderer = None
 
         MujocoEnv.__init__(
             self,
@@ -1784,34 +1789,28 @@ class MetaMachine(Base, MujocoEnv):
 
         # Recreate EGL renderer if needed
         if self.render_mode == "mp4":
-            self.egl_renderer = None  # Force recreation
-            self.preferred_camera_id = None  # Reset camera preference
+            self.egl_renderer = None
+            self.preferred_camera_id = None
 
     def render(self) -> Optional[Union[np.ndarray, Any]]:  # type: ignore
         """Render environment with different modes: 'none', 'viewer', 'mp4'."""
         if self.render_mode == "none":
-            # No rendering
             return None
 
         elif self.render_mode == "viewer":
-            # Use passive viewer with simulation loop
             if self._passive_viewer is None:
-                # Initialize passive viewer on first call
                 self._viewer_context_manager = mujoco.viewer.launch_passive(
                     self.model, self.data
                 )
                 assert self._viewer_context_manager is not None
-                self._passive_viewer = self._viewer_context_manager.__enter__()  # type: ignore
+                self._passive_viewer = self._viewer_context_manager.__enter__()
                 print("Passive viewer initialized successfully")
-
-            return None  # type: ignore
+            return None
 
         elif self.render_mode == "mp4":
-            # EGL rendering for video recording
             return self._capture_frame_egl()
 
         else:
-            print(f"Warning: Unknown render mode '{self.render_mode}'. Using 'none'.")
             return None
 
     def close(self) -> None:
@@ -1829,10 +1828,10 @@ class MetaMachine(Base, MujocoEnv):
             hasattr(self, "_viewer_context_manager")
             and self._viewer_context_manager is not None
         ):
-            try:  # type: ignore
+            try:
                 self._viewer_context_manager.__exit__(None, None, None)
             except Exception:
-                pass  # Ignore errors during cleanup
+                pass
             finally:
                 self._passive_viewer = None
                 self._viewer_context_manager = None
@@ -1968,26 +1967,17 @@ class MetaMachine(Base, MujocoEnv):
         Step the simulation n number of frames and applying a control action.
         Integrates with passive viewer when in 'viewer' mode.
         """
-        # Check control input is contained in the action space
         if np.array(ctrl).shape != (self.model.nu,):
             raise ValueError(
                 f"Action dimension mismatch. Expected {(self.model.nu,)}, found {np.array(ctrl).shape}"
             )
 
         if self.render_mode == "viewer" and self._passive_viewer is not None:
-            # Use passive viewer with individual step control
-            self.data.ctrl[:] = ctrl  # type: ignore
-
+            self.data.ctrl[:] = ctrl
             for _i in range(n_frames):
                 mujoco.mj_step(self.model, self.data)
-
-                # Sync with viewer
                 self._passive_viewer.sync()
-
-                # Timing control - sleep for timestep duration
-                # time.sleep(self.model.opt.timestep)
         else:
-            # Standard simulation without viewer
             self._step_mujoco_simulation(ctrl, n_frames)
 
     def _step_mujoco_simulation(self, ctrl: np.ndarray, n_frames: int) -> None:

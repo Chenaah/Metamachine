@@ -211,3 +211,5 @@ def get_weld_cluster_center_of_mass(
         # Fallback to simple average if all masses are zero
         return np.mean([data.xpos[body_id] for body_id in largest_cluster], axis=0)
 
+
+
