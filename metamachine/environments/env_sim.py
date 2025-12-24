@@ -308,8 +308,13 @@ class MetaMachine(Base, MujocoEnv):
         
         if restructure and hasattr(robot, "save"):
             # Save to temp file with restructuring
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
-                temp_xml_path = f.name
+            # Use _log_dir if available to avoid race conditions in parallel environments
+            if self._log_dir is not None:
+                import uuid
+                temp_xml_path = os.path.join(self._log_dir, f"robot_temp_{uuid.uuid4().hex[:8]}.xml")
+            else:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
+                    temp_xml_path = f.name
             
             # Convert restructure_qpos from OmegaConf if needed
             if restructure_qpos is not None:
@@ -346,7 +351,9 @@ class MetaMachine(Base, MujocoEnv):
                 if os.path.exists(temp_xml_path):
                     os.unlink(temp_xml_path)
 
-        self.xml_compiler.save(os.path.join(self._log_dir, "robot_debug.xml"))
+        # Save debug XML only if log directory is available
+        if self._log_dir is not None:
+            self.xml_compiler.save(os.path.join(self._log_dir, "robot_debug.xml"))
         
         # Setup mass range if mass randomization is enabled
         randomization_cfg = getattr(self.cfg, "randomization", {})

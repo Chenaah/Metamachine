@@ -39,6 +39,14 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
+# Try to import tensordict for rsl_rl compatibility
+try:
+    from tensordict import TensorDict
+    TENSORDICT_AVAILABLE = True
+except ImportError:
+    TensorDict = None
+    TENSORDICT_AVAILABLE = False
+
 # Try to import ray, but make it optional
 try:
     import ray
@@ -321,25 +329,74 @@ def _create_remote_metamachine_class():
         enabling parallel execution of multiple environments.
         """
         
-        def __init__(self, cfg, env_id: int):
+        def __init__(self, cfg, env_id: int, plugin_dirs: Optional[List[str]] = None):
             """Initialize remote environment.
             
             Args:
                 cfg: Environment configuration (OmegaConf object).
                 env_id: Environment ID for identification.
+                plugin_dirs: Optional list of plugin directories to load.
             """
+            import tempfile
+            import uuid
+            
             # Set EGL for headless rendering
             os.environ['MUJOCO_GL'] = 'egl'
             os.environ['MUJOCO_EGL_DEVICE_ID'] = '0'
+            
+            # Load plugins if specified (needed for custom robot types)
+            if plugin_dirs:
+                from metamachine.robot_factory import load_plugins_from
+                for plugin_dir in plugin_dirs:
+                    if os.path.exists(plugin_dir):
+                        load_plugins_from(plugin_dir)
             
             # Deep copy config to avoid shared state issues
             self.cfg = copy.deepcopy(cfg)
             self.env_id = env_id
             
-            # Disable rendering for remote environments
-            self.cfg.simulation.render_mode = "none"
-            if hasattr(self.cfg, 'logging'):
+            # Create a unique temp directory for this worker to avoid race conditions
+            # Uses UUID to ensure uniqueness even across restarts
+            unique_id = f"{env_id}_{uuid.uuid4().hex[:8]}"
+            worker_tmp_dir = os.path.join(
+                tempfile.gettempdir(), 
+                "metamachine_workers", 
+                f"worker_{unique_id}"
+            )
+            os.makedirs(worker_tmp_dir, exist_ok=True)
+            
+            # Environment 0 (primary) keeps original config for logging and video recording
+            # All other environments disable rendering and use temp directories
+            is_primary_env = (env_id == 0)
+            
+            # Setup logging config
+            if not hasattr(self.cfg, 'logging'):
+                from omegaconf import OmegaConf
+                self.cfg.logging = OmegaConf.create({})
+            
+            if not is_primary_env:
+                # Disable rendering for non-primary environments
+                self.cfg.simulation.render_mode = "none"
+                self.cfg.simulation.render = False
+                self.cfg.simulation.video_record_interval = None
+                
+                # Use temp directory for non-primary environments
                 self.cfg.logging.create_log_dir = False
+                self.cfg.logging.data_dir = worker_tmp_dir
+            else:
+                # Primary env: enable log directory creation for video recording
+                # This creates a proper log directory (not temp) for videos and artifacts
+                render_mode = self.cfg.simulation.get('render_mode', 'none')
+                if render_mode == 'mp4':
+                    # Enable log dir creation so videos go to a visible location
+                    self.cfg.logging.create_log_dir = True
+                    # Use ./logs as base if data_dir not specified
+                    if not self.cfg.logging.get('data_dir'):
+                        self.cfg.logging.data_dir = "./logs"
+                else:
+                    # No video recording, use temp dir
+                    if not self.cfg.logging.get('data_dir'):
+                        self.cfg.logging.data_dir = worker_tmp_dir
             
             # Import here to avoid circular imports
             from metamachine.environments.env_sim import MetaMachine
@@ -473,13 +530,25 @@ def _create_remote_metamachine_class():
             Returns:
                 Dictionary with environment info.
             """
+            num_modules = self.env.state.num_act if hasattr(self.env, 'state') else self.num_actions
             return {
                 'num_obs': self.num_obs,
                 'num_actions': self.num_actions,
                 'max_episode_length': self.max_episode_length,
                 'env_id': self.env_id,
-                'num_modules': self.env.state.num_act if hasattr(self.env, 'state') else self.num_actions,
+                'num_modules': num_modules,
+                # Privileged observations can include additional state info
+                # For now, same as policy observations
+                'num_privileged_obs': self.num_obs,
             }
+        
+        def get_log_dir(self) -> Optional[str]:
+            """Get the log directory for this environment.
+            
+            Returns:
+                Path to log directory, or None if not set.
+            """
+            return getattr(self.env, '_log_dir', None)
         
         def close(self) -> None:
             """Close the environment."""
@@ -514,6 +583,7 @@ class RayVecMetaMachine(VecEnv):
         num_gpus_per_env: float = 0.0,
         ray_temp_dir: Optional[str] = None,
         use_torch: bool = True,
+        plugin_dirs: Optional[List[str]] = None,
     ):
         """Initialize Ray-based vectorized environment.
         
@@ -529,6 +599,8 @@ class RayVecMetaMachine(VecEnv):
             num_gpus_per_env: GPU resources per environment actor.
             ray_temp_dir: Temporary directory for Ray.
             use_torch: Whether to return torch tensors (True) or numpy arrays (False).
+            plugin_dirs: Optional list of plugin directories to load in workers.
+                Required for custom robot types like lego_legs that are loaded via plugins.
         """
         if not RAY_AVAILABLE:
             raise ImportError(
@@ -552,6 +624,7 @@ class RayVecMetaMachine(VecEnv):
         self.cfg = cfg
         self.num_cpus_per_env = num_cpus_per_env
         self.num_gpus_per_env = num_gpus_per_env
+        self.plugin_dirs = plugin_dirs
         
         # Create remote environment class
         RemoteMetaMachine = _create_remote_metamachine_class()
@@ -564,7 +637,7 @@ class RayVecMetaMachine(VecEnv):
                 num_cpus=num_cpus_per_env,
                 num_gpus=num_gpus_per_env
             )
-            env_actor = RemoteEnvClass.remote(cfg, i)
+            env_actor = RemoteEnvClass.remote(cfg, i, plugin_dirs)
             self.envs.append(env_actor)
         
         # Get environment info from first environment
@@ -573,13 +646,20 @@ class RayVecMetaMachine(VecEnv):
         self.num_actions = env_info['num_actions']
         self.max_episode_length = env_info['max_episode_length']
         self.num_modules = env_info.get('num_modules', self.num_actions)
-        self.num_privileged_obs = None  # Can be extended if needed
+        self.num_privileged_obs = env_info.get('num_privileged_obs', self.num_obs)
         
-        # Initialize tracking
+        # Initialize tracking buffers
         self._obs_buffer = None
+        self._privileged_obs_buffer = None
         self._state_buffer: List[Optional[StateSnapshot]] = [None] * num_envs
         self._episode_lengths = np.zeros(num_envs, dtype=np.int32)
         self._episode_rewards = np.zeros(num_envs, dtype=np.float32)
+        
+        # RSL-RL compatibility: episode_length_buf as torch tensor
+        if self.use_torch:
+            self.episode_length_buf = torch.zeros(num_envs, dtype=torch.long, device=device)
+        else:
+            self.episode_length_buf = np.zeros(num_envs, dtype=np.int64)
         
         # Initialize environments
         self._initialized = False
@@ -610,7 +690,7 @@ class RayVecMetaMachine(VecEnv):
             return data.cpu().numpy()
         return np.asarray(data)
     
-    def reset(self, seed: Optional[int] = None) -> Tuple[Any, Optional[Any]]:
+    def reset(self, seed: Optional[int] = None) -> Any:
         """Reset all environments and return observations.
         
         Args:
@@ -618,8 +698,7 @@ class RayVecMetaMachine(VecEnv):
                 Each environment will use seed + env_id.
             
         Returns:
-            Tuple of (observations, privileged_observations).
-            Observations shape: (num_envs, num_obs).
+            TensorDict with "policy" and "critic" observation groups.
         """
         # Reset all environments in parallel
         if seed is not None:
@@ -636,6 +715,7 @@ class RayVecMetaMachine(VecEnv):
         # Stack observations
         obs_np = np.stack(obs_list, axis=0)
         self._obs_buffer = obs_np.copy()
+        self._privileged_obs_buffer = None  # Reset privileged obs buffer
         
         # Reset tracking
         self._episode_lengths.fill(0)
@@ -643,8 +723,14 @@ class RayVecMetaMachine(VecEnv):
         self._state_buffer = [None] * self.num_envs
         self._initialized = True
         
-        obs = self._to_tensor(obs_np)
-        return obs, None  # No privileged observations for now
+        # Reset episode_length_buf
+        if self.use_torch:
+            self.episode_length_buf.zero_()
+        else:
+            self.episode_length_buf.fill(0)
+        
+        # Return as TensorDict
+        return self.get_observations()
     
     def reset_with_states(self, seed: Optional[int] = None) -> Tuple[Any, Optional[Any], List[StateSnapshot]]:
         """Reset all environments and return observations with state snapshots.
@@ -680,19 +766,20 @@ class RayVecMetaMachine(VecEnv):
         obs = self._to_tensor(obs_np)
         return obs, None, list(state_list)
     
-    def step(self, actions: Any) -> Tuple[Any, Any, Any, Any, Dict[str, Any]]:
+    def step(self, actions: Any) -> Tuple[Any, Any, Any, Dict[str, Any]]:
         """Step all environments with given actions.
+        
+        RSL-RL compatible interface that returns:
+        - obs: TensorDict with "policy" and "critic" observation groups
+        - rewards: Tensor of shape (num_envs,)
+        - dones: Tensor of shape (num_envs,)
+        - extras: Dict with "time_outs" and optional "log" info
         
         Args:
             actions: Actions tensor/array of shape (num_envs, num_actions).
             
         Returns:
-            Tuple of (obs, privileged_obs, rewards, dones, infos).
-            - obs: (num_envs, num_obs)
-            - privileged_obs: None (not implemented)
-            - rewards: (num_envs,)
-            - dones: (num_envs,) boolean
-            - infos: Dictionary with additional info
+            Tuple of (obs, rewards, dones, extras).
         """
         if not self._initialized:
             raise RuntimeError("Environment not initialized. Call reset() first.")
@@ -720,33 +807,74 @@ class RayVecMetaMachine(VecEnv):
         self._episode_lengths += 1
         self._episode_rewards += rewards_np
         
-        # Build info dictionary
-        infos = {
-            "observations": {
-                "critic": self._to_tensor(obs_np),  # Same as actor obs for now
-            },
-            "episode_lengths": self._episode_lengths.copy(),
-            "episode_rewards": self._episode_rewards.copy(),
-            "original_infos": info_list,
+        # Update episode_length_buf (RSL-RL compatibility)
+        if self.use_torch:
+            self.episode_length_buf += 1
+        else:
+            self.episode_length_buf += 1
+        
+        # Detect time_outs (truncations due to max episode length, not terminal states)
+        # Check if done was due to time limit
+        time_outs_np = np.zeros(self.num_envs, dtype=bool)
+        for i, info in enumerate(info_list):
+            if isinstance(info, dict):
+                # Check for truncated flag (gymnasium style)
+                if info.get('TimeLimit.truncated', False) or info.get('truncated', False):
+                    time_outs_np[i] = True
+                # Also check if episode length reached max
+                elif dones_np[i] and self._episode_lengths[i] >= self.max_episode_length:
+                    time_outs_np[i] = True
+        
+        # Build extras dictionary (RSL-RL format)
+        extras = {
+            "time_outs": self._to_tensor(time_outs_np.astype(np.float32)) if self.use_torch else time_outs_np,
         }
         
-        # Add episode info for completed episodes
+        # Collect reward components from all environments for logging
+        # This aggregates the reward breakdown (like forward_velocity, orientation, etc.)
+        reward_components_sum = {}
+        reward_components_count = 0
+        for info in info_list:
+            if isinstance(info, dict) and 'reward_components' in info:
+                for comp_name, comp_value in info['reward_components'].items():
+                    if comp_name not in reward_components_sum:
+                        reward_components_sum[comp_name] = 0.0
+                    reward_components_sum[comp_name] += comp_value
+                reward_components_count += 1
+        
+        # Add logging info
+        log_info = {}
+        
+        # Add reward component breakdown (averaged across environments)
+        if reward_components_count > 0:
+            for comp_name, comp_sum in reward_components_sum.items():
+                log_info[f"/reward/{comp_name}"] = comp_sum / reward_components_count
+        
+        # Add episode stats for completed episodes
         if dones_np.any():
-            infos["episode"] = {
-                "r": self._episode_rewards[dones_np].copy(),
-                "l": self._episode_lengths[dones_np].copy(),
-            }
-            # Reset tracking for done environments
+            log_info["/episode/reward"] = self._episode_rewards[dones_np].mean()
+            log_info["/episode/length"] = self._episode_lengths[dones_np].mean()
+        
+        if log_info:
+            extras["log"] = log_info
+        
+        # Reset tracking for done environments
+        if dones_np.any():
             self._episode_lengths[dones_np] = 0
             self._episode_rewards[dones_np] = 0.0
+            if self.use_torch:
+                self.episode_length_buf[torch.tensor(dones_np, device=self.device)] = 0
+            else:
+                self.episode_length_buf[dones_np] = 0
         
         # Convert outputs
-        obs = self._to_tensor(obs_np)
-        privileged_obs = None
         rewards = self._to_tensor(rewards_np)
         dones = self._to_tensor(dones_np.astype(np.float32))
         
-        return obs, privileged_obs, rewards, dones, infos
+        # Get observations as TensorDict
+        obs = self.get_observations()
+        
+        return obs, rewards, dones, extras
     
     def step_with_states(
         self, actions: Any
@@ -820,9 +948,22 @@ class RayVecMetaMachine(VecEnv):
     def get_observations(self) -> Any:
         """Get current observations from all environments.
         
+        Returns observations as a TensorDict for rsl_rl compatibility.
+        The TensorDict contains:
+        - "policy": Policy observations (what the actor sees)
+        - "critic": Critic observations (can include privileged info)
+        
+        If the environment hasn't been initialized yet, this will
+        automatically call reset() to initialize it.
+        
         Returns:
-            Observations tensor/array of shape (num_envs, num_obs).
+            TensorDict with observation groups, or raw tensor if TensorDict not available.
         """
+        # Auto-initialize if not yet done (required by rsl_rl which calls get_observations before reset)
+        if not self._initialized:
+            self.reset()
+            return self.get_observations()
+        
         if self._obs_buffer is None:
             # Get observations from all environments in parallel
             obs_futures = [env.get_observation.remote() for env in self.envs]
@@ -830,7 +971,23 @@ class RayVecMetaMachine(VecEnv):
             obs_np = np.stack(obs_list, axis=0)
             self._obs_buffer = obs_np.copy()
         
-        return self._to_tensor(self._obs_buffer)
+        obs_tensor = self._to_tensor(self._obs_buffer)
+        
+        # Return as TensorDict for rsl_rl compatibility
+        if TENSORDICT_AVAILABLE and self.use_torch:
+            # For now, policy and critic use the same observations
+            # This can be extended to support privileged observations
+            privileged_obs = self._to_tensor(self._privileged_obs_buffer) if self._privileged_obs_buffer is not None else obs_tensor
+            return TensorDict(
+                {
+                    "policy": obs_tensor,
+                    "critic": privileged_obs,
+                },
+                batch_size=[self.num_envs],
+                device=self.device,
+            )
+        
+        return obs_tensor
     
     def get_states(self) -> List[StateSnapshot]:
         """Get current state snapshots from all environments.
@@ -850,6 +1007,33 @@ class RayVecMetaMachine(VecEnv):
             None (privileged observations not implemented).
         """
         return None
+    
+    def get_log_dir(self) -> Optional[str]:
+        """Get the log directory from the primary environment (env_id=0).
+        
+        Only the primary environment maintains a real log directory for
+        video recording and logging. Other environments use temp directories.
+        
+        Returns:
+            Path to log directory, or None if not available.
+        """
+        if self.envs:
+            try:
+                return ray.get(self.envs[0].get_log_dir.remote())
+            except Exception:
+                return None
+        return None
+    
+    @property
+    def log_dir(self) -> Optional[str]:
+        """Log directory from the primary environment (env_id=0).
+        
+        This property provides convenient access to the log directory
+        where videos and other artifacts are saved.
+        """
+        if not hasattr(self, '_cached_log_dir'):
+            self._cached_log_dir = self.get_log_dir()
+        return self._cached_log_dir
     
     def close(self) -> None:
         """Close all remote environments and cleanup."""

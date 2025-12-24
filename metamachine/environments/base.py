@@ -334,38 +334,49 @@ class Base(gym.Env, ABC):
             self._log_dir = self.cfg.logging.get("data_dir", None)
 
     def create_log_directory(self, log_dir, exp_name: Optional[str] = None):
-        """Create a log directory for saving logs with date and component information."""
-        # Get current date
-        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        """Create a log directory for saving logs with date and component information.
+        
+        If exp_name is provided and contains a timestamp pattern (like "name-YYYYMMDD-HHMMSS"),
+        it will be used directly as the directory name. Otherwise, a directory name will be
+        generated with date and component info.
+        """
+        # If exp_name looks like a complete experiment name (contains date pattern), use it directly
+        if exp_name and "-" in exp_name and any(c.isdigit() for c in exp_name):
+            # exp_name is like "lego_tripod-20231223-222348", use directly
+            dir_name = exp_name
+        else:
+            # Generate directory name with date and component info (legacy behavior)
+            date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # Get observation component initials
-        obs_initials = ""
-        if hasattr(self, "state") and hasattr(self.state, "observation_components"):
-            obs_initials = "".join(
-                [comp.name[0] for comp in self.state.observation_components]
-            )
+            # Get observation component initials
+            obs_initials = ""
+            if hasattr(self, "state") and hasattr(self.state, "observation_components"):
+                obs_initials = "".join(
+                    [comp.name[0] for comp in self.state.observation_components]
+                )
 
-        # Get reward component initials
-        reward_initials = ""
-        if hasattr(self, "reward_calculator") and hasattr(
-            self.reward_calculator, "components"
-        ):
-            reward_initials = "".join(
-                [comp.name[0] for comp in self.reward_calculator.components]
-            )
+            # Get reward component initials
+            reward_initials = ""
+            if hasattr(self, "reward_calculator") and hasattr(
+                self.reward_calculator, "components"
+            ):
+                reward_initials = "".join(
+                    [comp.name[0] for comp in self.reward_calculator.components]
+                )
 
-        robot_name = self.cfg.morphology.get("robot_type", "robot")
-        robot_name_initials = robot_name[0]
-        # Create directory name with date and component info
-        dir_components = [date_str + robot_name_initials]
-        if obs_initials:
-            dir_components.append(f"obs_{obs_initials}")
-        if reward_initials:
-            dir_components.append(f"rew_{reward_initials}")
-        if exp_name:
-            dir_components.append(exp_name)
+            robot_name = self.cfg.morphology.get("robot_type", "robot")
+            robot_name_initials = robot_name[0]
+            # Create directory name with date and component info
+            dir_components = [date_str + robot_name_initials]
+            if obs_initials:
+                dir_components.append(f"obs_{obs_initials}")
+            if reward_initials:
+                dir_components.append(f"rew_{reward_initials}")
+            if exp_name:
+                dir_components.append(exp_name)
 
-        dir_name = "_".join(dir_components)
+            dir_name = "_".join(dir_components)
+        
         self._log_dir = os.path.join(log_dir, dir_name)
 
         if not os.path.exists(self._log_dir):
