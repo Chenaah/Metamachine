@@ -506,6 +506,9 @@ class MetaMachine(Base, MujocoEnv):
         if self.video_fps is None:
             self.video_fps = 1 / self.cfg.control.dt  # type: ignore
 
+        # Set up termination checker with model for body contact termination
+        self.termination_checker.set_model(self.model)
+
     def _setup_terrain(self) -> None:
         """Setup terrain generation system."""
         # TODO: Implement terrain system when available

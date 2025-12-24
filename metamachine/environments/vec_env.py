@@ -516,6 +516,17 @@ def _create_remote_metamachine_class():
             """
             return self.env.state.get_observation(insert=False).astype(np.float32)
         
+        def get_critic_observation(self) -> np.ndarray:
+            """Get current critic observation without stepping.
+            
+            Critic observations can include privileged information not available
+            to the policy (e.g., true velocities, contact forces).
+            
+            Returns:
+                Current critic observation array.
+            """
+            return self.env.state.get_critic_observation(insert=False).astype(np.float32)
+        
         def get_state_snapshot(self) -> StateSnapshot:
             """Get current state as a serializable snapshot.
             
@@ -531,15 +542,17 @@ def _create_remote_metamachine_class():
                 Dictionary with environment info.
             """
             num_modules = self.env.state.num_act if hasattr(self.env, 'state') else self.num_actions
+            num_critic_obs = self.env.state.num_critic_obs if hasattr(self.env, 'state') else self.num_obs
             return {
                 'num_obs': self.num_obs,
                 'num_actions': self.num_actions,
                 'max_episode_length': self.max_episode_length,
                 'env_id': self.env_id,
                 'num_modules': num_modules,
-                # Privileged observations can include additional state info
-                # For now, same as policy observations
-                'num_privileged_obs': self.num_obs,
+                # Critic observations can include privileged state info
+                'num_critic_obs': num_critic_obs,
+                # Legacy alias
+                'num_privileged_obs': num_critic_obs,
             }
         
         def get_log_dir(self) -> Optional[str]:
@@ -646,11 +659,13 @@ class RayVecMetaMachine(VecEnv):
         self.num_actions = env_info['num_actions']
         self.max_episode_length = env_info['max_episode_length']
         self.num_modules = env_info.get('num_modules', self.num_actions)
-        self.num_privileged_obs = env_info.get('num_privileged_obs', self.num_obs)
+        self.num_critic_obs = env_info.get('num_critic_obs', self.num_obs)
+        self.num_privileged_obs = self.num_critic_obs  # Legacy alias
         
         # Initialize tracking buffers
         self._obs_buffer = None
-        self._privileged_obs_buffer = None
+        self._critic_obs_buffer = None
+        self._privileged_obs_buffer = None  # Legacy alias for critic obs
         self._state_buffer: List[Optional[StateSnapshot]] = [None] * num_envs
         self._episode_lengths = np.zeros(num_envs, dtype=np.int32)
         self._episode_rewards = np.zeros(num_envs, dtype=np.float32)
@@ -715,7 +730,8 @@ class RayVecMetaMachine(VecEnv):
         # Stack observations
         obs_np = np.stack(obs_list, axis=0)
         self._obs_buffer = obs_np.copy()
-        self._privileged_obs_buffer = None  # Reset privileged obs buffer
+        self._critic_obs_buffer = None  # Reset critic obs buffer - will be fetched on first get_observations
+        self._privileged_obs_buffer = None  # Legacy alias
         
         # Reset tracking
         self._episode_lengths.fill(0)
@@ -804,6 +820,7 @@ class RayVecMetaMachine(VecEnv):
         
         # Update tracking
         self._obs_buffer = obs_np.copy()
+        self._critic_obs_buffer = None  # Invalidate to refetch critic obs
         self._episode_lengths += 1
         self._episode_rewards += rewards_np
         
@@ -965,23 +982,28 @@ class RayVecMetaMachine(VecEnv):
             return self.get_observations()
         
         if self._obs_buffer is None:
-            # Get observations from all environments in parallel
+            # Get policy observations from all environments in parallel
             obs_futures = [env.get_observation.remote() for env in self.envs]
             obs_list = ray.get(obs_futures)
             obs_np = np.stack(obs_list, axis=0)
             self._obs_buffer = obs_np.copy()
         
+        if self._critic_obs_buffer is None:
+            # Get critic observations from all environments in parallel
+            critic_obs_futures = [env.get_critic_observation.remote() for env in self.envs]
+            critic_obs_list = ray.get(critic_obs_futures)
+            critic_obs_np = np.stack(critic_obs_list, axis=0)
+            self._critic_obs_buffer = critic_obs_np.copy()
+        
         obs_tensor = self._to_tensor(self._obs_buffer)
+        critic_obs_tensor = self._to_tensor(self._critic_obs_buffer)
         
         # Return as TensorDict for rsl_rl compatibility
         if TENSORDICT_AVAILABLE and self.use_torch:
-            # For now, policy and critic use the same observations
-            # This can be extended to support privileged observations
-            privileged_obs = self._to_tensor(self._privileged_obs_buffer) if self._privileged_obs_buffer is not None else obs_tensor
             return TensorDict(
                 {
                     "policy": obs_tensor,
-                    "critic": privileged_obs,
+                    "critic": critic_obs_tensor,
                 },
                 batch_size=[self.num_envs],
                 device=self.device,

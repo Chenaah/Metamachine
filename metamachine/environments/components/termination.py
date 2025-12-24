@@ -30,6 +30,7 @@ class TerminationStrategy(Enum):
     TORSO_FALL = "torso_fall"
     THREE_FEET = "three_feet"
     BALL_FALL = "ball_fall"
+    BODY_CONTACT_FLOOR = "body_contact_floor"
 
 
 class TerminationChecker:
@@ -82,6 +83,30 @@ class TerminationChecker:
         self.balance_threshold = 0.01
         self.orientation_threshold = 0.1
 
+        # Body/geom contact termination - parse names from config
+        # Option 1: terminate_on_body_contact - list of body names
+        # (terminates if ANY geom belonging to the body contacts floor)
+        terminate_bodies = getattr(term_cfg, "terminate_on_body_contact", None)
+        if terminate_bodies is not None:
+            if isinstance(terminate_bodies, str):
+                terminate_bodies = [terminate_bodies]
+            self.terminate_on_body_contact = list(terminate_bodies)
+        else:
+            self.terminate_on_body_contact = None
+
+        # Option 2: terminate_on_geom_contact - list of geom names
+        # (terminates if the specific geom contacts floor)
+        terminate_geoms = getattr(term_cfg, "terminate_on_geom_contact", None)
+        if terminate_geoms is not None:
+            if isinstance(terminate_geoms, str):
+                terminate_geoms = [terminate_geoms]
+            self.terminate_on_geom_contact = list(terminate_geoms)
+        else:
+            self.terminate_on_geom_contact = None
+
+        # Will be populated by set_model() with geom IDs for the configured bodies/geoms
+        self._body_contact_geom_ids = set()
+
     def _setup_termination_handlers(self) -> None:
         """Set up mapping of termination strategies to their handler functions."""
         self._termination_handlers = {
@@ -92,11 +117,53 @@ class TerminationChecker:
             TerminationStrategy.TORSO_FALL: self._check_torso_fall,
             TerminationStrategy.THREE_FEET: self._check_three_feet,
             TerminationStrategy.BALL_FALL: self._check_ball_fall,
+            TerminationStrategy.BODY_CONTACT_FLOOR: self._check_body_contact_floor,
         }
 
     def reset(self) -> None:
         """Reset the termination checker for a new episode."""
         self.current_step = 0
+
+    def set_model(self, model) -> None:
+        """Set up body/geom name to geom ID mapping from MuJoCo model.
+
+        This method should be called after the MuJoCo model is loaded to
+        enable body/geom contact termination checking.
+
+        Args:
+            model: MuJoCo model object (mujoco.MjModel)
+        """
+        if self.terminate_on_body_contact is None and self.terminate_on_geom_contact is None:
+            return
+
+        self._body_contact_geom_ids = set()
+
+        # Process body names - find all geoms belonging to each body
+        if self.terminate_on_body_contact is not None:
+            for body_name in self.terminate_on_body_contact:
+                try:
+                    body_id = model.body(body_name).id
+                    # Find all geoms belonging to this body
+                    for geom_id in range(model.ngeom):
+                        if model.geom_bodyid[geom_id] == body_id:
+                            self._body_contact_geom_ids.add(geom_id)
+                except KeyError:
+                    print(
+                        f"Warning: Body '{body_name}' not found in model. "
+                        f"Body contact termination will not work for this body."
+                    )
+
+        # Process geom names - look up geom IDs directly
+        if self.terminate_on_geom_contact is not None:
+            for geom_name in self.terminate_on_geom_contact:
+                try:
+                    geom_id = model.geom(geom_name).id
+                    self._body_contact_geom_ids.add(geom_id)
+                except KeyError:
+                    print(
+                        f"Warning: Geom '{geom_name}' not found in model. "
+                        f"Geom contact termination will not work for this geom."
+                    )
 
     def step(self) -> None:
         """Increment the step counter."""
@@ -179,6 +246,23 @@ class TerminationChecker:
 
     def _check_ball_fall(self, state) -> bool:
         return bool(state.contact_floor_balls)
+
+    def _check_body_contact_floor(self, state) -> bool:
+        """Check if any of the configured bodies/geoms are in contact with floor.
+
+        Requires set_model() to be called first to map body/geom names to geom IDs.
+        """
+        if not self._body_contact_geom_ids:
+            if self.terminate_on_body_contact or self.terminate_on_geom_contact:
+                print(
+                    "Warning: body_contact_floor termination strategy is active but "
+                    "no geom IDs were found. Did you call set_model()?"
+                )
+            return False
+
+        # Check if any of the configured geoms are in contact with floor
+        contact_geoms = set(state.contact_floor_geoms)
+        return bool(self._body_contact_geom_ids & contact_geoms)
 
     def check_truncated(self, state) -> bool:
         """Check if episode should be truncated (terminated early).

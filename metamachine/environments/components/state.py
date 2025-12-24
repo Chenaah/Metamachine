@@ -633,6 +633,23 @@ class State:
         self.obs_buf = ObservationBuffer(
             self.num_obs * self.num_envs, self.include_history_steps
         )
+        
+        # Critic observation settings (for asymmetric actor-critic)
+        self.critic_observation_components = []
+        self.critic_modular_mode = False
+        self.critic_modular_components = []
+        self.critic_global_components = []
+        self.critic_main_module_index = None
+        self._setup_critic_observation_components()
+        
+        # Calculate critic observation size
+        critic_obs = self._construct_critic_observation()
+        self.num_critic_obs = len(critic_obs)
+        
+        # Initialize critic observation buffer
+        self.critic_obs_buf = ObservationBuffer(
+            self.num_critic_obs * self.num_envs, self.include_history_steps
+        )
 
     def __getattr__(self, name):
         """Automatically forward attribute access to raw, derived, accurate state objects, or observable_data.
@@ -730,6 +747,14 @@ class State:
                 "num_modules",
                 "modular_components",
                 "global_components",
+                # Critic observation attributes
+                "critic_observation_components",
+                "critic_modular_mode",
+                "critic_modular_components",
+                "critic_global_components",
+                "critic_main_module_index",
+                "num_critic_obs",
+                "critic_obs_buf",
                 # Observation masking attributes
                 "dof_pos_mask",
                 "dof_vel_mask",
@@ -1038,6 +1063,131 @@ class State:
         
         return identity
 
+    def _setup_critic_observation_components(self) -> None:
+        """Set up critic observation components for asymmetric actor-critic.
+        
+        Critic observations can include privileged information that the policy
+        doesn't have access to (e.g., true velocities, contact info).
+        
+        If no critic config is specified, critic observations default to
+        the same as policy observations.
+        
+        Configuration example in YAML:
+            observation:
+              critic:
+                enabled: true
+                # Option 1: Flat mode - list of components
+                components:
+                  - name: projected_gravity
+                  - name: ang_vel_body
+                  - name: vel_body        # Privileged info!
+                  - name: dof_pos
+                  - name: dof_vel
+                  - name: last_action
+                
+                # Option 2: Modular mode (same as policy modular config)
+                # modular:
+                #   enabled: true
+                #   num_modules: 3
+                #   per_module_components:
+                #     - name: projected_gravities
+                #       index_type: element
+                #   global_components:
+                #     - name: vel_body      # Privileged info!
+                #     - name: dof_pos
+        """
+        critic_cfg = getattr(self.cfg.observation, "critic", None)
+        
+        # If no critic config, default to copying policy observations
+        if critic_cfg is None or not getattr(critic_cfg, "enabled", False):
+            # Copy policy observation setup
+            self.critic_observation_components = list(self.observation_components)
+            self.critic_modular_mode = self.modular_mode
+            self.critic_modular_components = list(self.modular_components)
+            self.critic_global_components = list(self.global_components)
+            self.critic_main_module_index = getattr(self, 'main_module_index', None)
+            return
+        
+        # Check if modular mode is enabled for critic
+        critic_modular_cfg = getattr(critic_cfg, "modular", None)
+        if critic_modular_cfg is not None and getattr(critic_modular_cfg, "enabled", False):
+            self._setup_critic_modular_components(critic_modular_cfg)
+        else:
+            self._setup_critic_flat_components(critic_cfg)
+    
+    def _setup_critic_flat_components(self, critic_cfg) -> None:
+        """Set up flat critic observation components."""
+        components = getattr(critic_cfg, "components", None)
+        
+        if components is None:
+            # If no components specified, copy from policy
+            self.critic_observation_components = list(self.observation_components)
+            return
+        
+        self.critic_modular_mode = False
+        for comp_spec in components:
+            comp_spec = self._normalize_component_spec(comp_spec)
+            comp_name = comp_spec["name"]
+            
+            if comp_name not in self.OBSERVATION_COMPONENTS:
+                raise ValueError(f"Unknown critic observation component: {comp_name}")
+            data_fn = self.OBSERVATION_COMPONENTS[comp_name]
+            transform_fn = self._build_transform_fn(comp_spec)
+            
+            self.critic_observation_components.append(
+                ObservationComponent(comp_name, data_fn, transform_fn)
+            )
+    
+    def _setup_critic_modular_components(self, critic_modular_cfg) -> None:
+        """Set up modular critic observation components."""
+        self.critic_modular_mode = True
+        
+        # Main module index for critic
+        self.critic_main_module_index = getattr(critic_modular_cfg, "main_module_index", None)
+        
+        # Number of modules (use same as policy if not specified)
+        num_modules = getattr(critic_modular_cfg, "num_modules", "auto")
+        if num_modules == "auto":
+            # Use the same num_modules as policy
+            num_modules = self.num_modules if self.num_modules > 0 else self.num_act
+        
+        # Per-module components for critic
+        per_module_specs = getattr(critic_modular_cfg, "per_module_components", [])
+        for comp_spec in per_module_specs:
+            comp_spec = self._normalize_component_spec(comp_spec)
+            comp_name = comp_spec["name"]
+            
+            if comp_name not in self.MODULAR_OBSERVATION_COMPONENTS:
+                raise ValueError(
+                    f"Unknown critic modular observation component: {comp_name}. "
+                    f"Available: {list(self.MODULAR_OBSERVATION_COMPONENTS.keys())}"
+                )
+            data_fn = self.MODULAR_OBSERVATION_COMPONENTS[comp_name]
+            index_type = comp_spec.get("index_type", "element")
+            slice_size = comp_spec.get("slice_size", 1)
+            transform_fn = self._build_transform_fn(comp_spec)
+            
+            self.critic_modular_components.append(
+                ModularObservationComponent(
+                    comp_name, data_fn, index_type, slice_size, transform_fn
+                )
+            )
+        
+        # Global components for critic
+        global_specs = getattr(critic_modular_cfg, "global_components", [])
+        for comp_spec in global_specs:
+            comp_spec = self._normalize_component_spec(comp_spec)
+            comp_name = comp_spec["name"]
+            
+            if comp_name not in self.OBSERVATION_COMPONENTS:
+                raise ValueError(f"Unknown critic observation component: {comp_name}")
+            data_fn = self.OBSERVATION_COMPONENTS[comp_name]
+            transform_fn = self._build_transform_fn(comp_spec)
+            
+            self.critic_global_components.append(
+                ObservationComponent(comp_name, data_fn, transform_fn)
+            )
+
     def reset(self) -> None:
         """Reset state variables."""
         # # Reset raw state
@@ -1284,6 +1434,100 @@ class State:
             self.obs_buf.insert(obs)
 
         return self.obs_buf.get_obs_vec()
+
+    def get_critic_observation(self, insert=True, reset=False):
+        """Get critic observation vector based on current state.
+        
+        Critic observations can include privileged information not available
+        to the policy (e.g., true velocities, contact info).
+
+        Args:
+            insert: Whether to insert observation into buffer
+            reset: Whether to reset observation buffer
+
+        Returns:
+            numpy.ndarray: Critic observation vector
+        """
+        critic_obs = self._construct_critic_observation()
+        critic_obs = np.clip(critic_obs, -self.clip_observations, self.clip_observations)
+
+        if reset:
+            self.critic_obs_buf.reset(critic_obs)
+        elif insert:
+            self.critic_obs_buf.insert(critic_obs)
+
+        return self.critic_obs_buf.get_obs_vec()
+    
+    def _construct_critic_observation(self):
+        """Construct critic observation vector based on critic components.
+
+        Returns:
+            numpy.ndarray: Raw critic observation vector
+        """
+        if self.critic_modular_mode:
+            return self._construct_critic_modular_observation()
+        else:
+            return self._construct_critic_flat_observation()
+    
+    def _construct_critic_flat_observation(self):
+        """Construct flat critic observation vector.
+        
+        Returns:
+            numpy.ndarray: Raw critic observation vector
+        """
+        obs_parts = []
+        for component in self.critic_observation_components:
+            data = component.get_data(self)
+            flattened_data = np.asarray(data).flatten()
+            obs_parts.append(flattened_data)
+        
+        if not obs_parts:
+            return np.array([])
+        
+        return np.concatenate(obs_parts)
+    
+    def _construct_critic_modular_observation(self):
+        """Construct modular critic observation vector.
+        
+        Returns:
+            numpy.ndarray: Raw critic observation vector with modular structure
+        """
+        obs_parts = []
+        
+        # Determine which module indices to iterate over
+        if self.critic_main_module_index is not None:
+            module_indices = [self.critic_main_module_index]
+        else:
+            module_indices = range(self.num_modules)
+        
+        # Per-module observations for critic
+        for module_idx in module_indices:
+            module_obs_parts = []
+            for component in self.critic_modular_components:
+                try:
+                    data = component.get_data_for_module(self, module_idx)
+                    flattened_data = np.asarray(data).flatten()
+                    module_obs_parts.append(flattened_data)
+                except (IndexError, TypeError) as e:
+                    print(
+                        f"ERROR: Failed to get critic data for component '{component.name}' "
+                        f"at module index {module_idx}: {e}"
+                    )
+                    raise
+            
+            if module_obs_parts:
+                obs_parts.append(np.concatenate(module_obs_parts))
+        
+        # Global observations for critic (added once at the end)
+        for component in self.critic_global_components:
+            data = component.get_data(self)
+            flattened_data = np.asarray(data).flatten()
+            obs_parts.append(flattened_data)
+        
+        if not obs_parts:
+            return np.array([])
+        
+        return np.concatenate(obs_parts)
 
     def _construct_observation(self):
         """Construct observation vector based on components.
