@@ -124,6 +124,20 @@ Keyboard Controls (during operation):
     )
     
     parser.add_argument(
+        "--log-dir", "-l",
+        type=str,
+        default=None,
+        help="Path to training log directory (loads config and checkpoint from there)"
+    )
+    
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="latest",
+        help="Checkpoint to load from log-dir: 'latest', 'final', 'best', or step number"
+    )
+    
+    parser.add_argument(
         "--no-dashboard",
         action="store_true",
         help="Disable Rich dashboard"
@@ -262,11 +276,11 @@ def run_sinusoidal_test(env, amplitude: float, frequency: float, duration: float
 
 
 def run_policy(env, policy, duration: float = None):
-    """Run a trained policy.
+    """Run a trained policy (PyTorch model).
     
     Args:
         env: RealMetaMachine environment
-        policy: Loaded policy model
+        policy: Loaded policy model (PyTorch)
         duration: Duration in seconds (None = run until interrupt)
     """
     import torch
@@ -324,6 +338,69 @@ def run_policy(env, policy, duration: float = None):
     finally:
         elapsed = time.time() - start_time
         print(f"\n\nPolicy run completed: {step_count} steps in {elapsed:.1f}s")
+
+
+def run_sb3_policy(env, model, duration: float = None, deterministic: bool = True):
+    """Run a trained SB3 policy.
+    
+    Args:
+        env: RealMetaMachine environment
+        model: Loaded SB3 model (CrossQ, SAC, PPO, etc.)
+        duration: Duration in seconds (None = run until interrupt)
+        deterministic: Use deterministic actions (no exploration noise)
+    """
+    print("\n" + "=" * 60)
+    print("Running SB3 Policy")
+    print("=" * 60)
+    print(f"  Duration: {'infinite' if duration is None else f'{duration}s'}")
+    print(f"  Deterministic: {deterministic}")
+    print("=" * 60)
+    print("\nPress 'e' to enable motors, 'q' to quit")
+    
+    # Reset environment
+    obs, info = env.reset()
+    
+    start_time = time.time()
+    step_count = 0
+    episode_reward = 0
+    episode_count = 0
+    
+    try:
+        while True:
+            elapsed = time.time() - start_time
+            
+            # Check duration
+            if duration is not None and elapsed >= duration:
+                print(f"\n[Done] Reached duration limit ({duration}s)")
+                break
+            
+            # Get action from SB3 model
+            action, _ = model.predict(obs, deterministic=deterministic)
+            
+            # Execute step
+            obs, reward, done, truncated, info = env.step(action)
+            step_count += 1
+            episode_reward += reward
+            
+            # Print status periodically
+            if step_count % 100 == 0:
+                print(f"\r[Step {step_count}] Time: {elapsed:.1f}s, "
+                      f"Episode Reward: {episode_reward:.2f}", end="", flush=True)
+            
+            # Check for episode end
+            if done or truncated:
+                episode_count += 1
+                print(f"\n[Episode {episode_count}] Reward: {episode_reward:.2f}")
+                obs, info = env.reset()
+                episode_reward = 0
+    
+    except KeyboardInterrupt:
+        print("\n[Interrupted]")
+    
+    finally:
+        elapsed = time.time() - start_time
+        print(f"\n\nPolicy run completed: {step_count} steps, "
+              f"{episode_count} episodes in {elapsed:.1f}s")
 
 
 def run_idle(env, duration: float = None):
@@ -394,7 +471,40 @@ def main():
     print("Real Robot Control - RealMetaMachine")
     print("=" * 60)
     
-    # Load configuration
+    # Check if loading from training log directory
+    if args.log_dir:
+        # Use load_from_checkpoint utility for seamless loading
+        print(f"\nLoading from training log: {args.log_dir}")
+        try:
+            from metamachine.utils.sb3_utils import load_from_checkpoint
+            
+            env, model, cfg = load_from_checkpoint(
+                args.log_dir,
+                checkpoint=args.checkpoint,
+                real_robot=True,
+            )
+            
+            # Override dashboard setting if requested
+            if args.no_dashboard:
+                if hasattr(cfg, 'real') and cfg.real:
+                    cfg.real.enable_dashboard = False
+            
+            try:
+                if model is not None:
+                    run_sb3_policy(env, model, duration=args.duration)
+                else:
+                    print("No model found in log directory. Running idle mode.")
+                    run_idle(env, duration=args.duration)
+            finally:
+                print("\nCleaning up...")
+                env.close()
+            return
+            
+        except ImportError as e:
+            print(f"Error: Could not import sb3_utils: {e}")
+            print("Falling back to manual config loading...")
+    
+    # Load configuration from file
     print(f"\nLoading config: {args.config}")
     cfg = load_config(args.config)
     
