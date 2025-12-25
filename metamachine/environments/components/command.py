@@ -95,6 +95,10 @@ class CommandManager:
         self.task_cfg = cfg.get("task", {})
         self.command_cfg = self.task_cfg.get("commands", {})
 
+        # Check for one-hot mode
+        # When enabled, commands form a one-hot vector (only one is 1.0, rest are 0.0)
+        self.onehot_mode = self.command_cfg.get("onehot_mode", False)
+
         # Initialize command specifications
         self._setup_command_specs()
 
@@ -219,16 +223,38 @@ class CommandManager:
         return [spec.name for spec in self.command_specs]
 
     def _sample_all_commands(self) -> None:
-        """Sample all command dimensions."""
-        for i, spec in enumerate(self.command_specs):
-            self.commands[i] = spec.sample()
+        """Sample all command dimensions.
+        
+        If onehot_mode is enabled, samples a one-hot vector where exactly one
+        command is 1.0 and all others are 0.0.
+        """
+        if self.onehot_mode:
+            # One-hot sampling: randomly select one command to be active
+            self._sample_onehot_commands()
+        else:
+            # Standard sampling: each command sampled independently
+            for i, spec in enumerate(self.command_specs):
+                self.commands[i] = spec.sample()
 
-        # Handle special case for onehot commands
-        if any("onehot" in spec.name for spec in self.command_specs):
-            self._handle_onehot_commands()
+            # Handle legacy onehot naming convention
+            if any("onehot" in spec.name for spec in self.command_specs):
+                self._handle_legacy_onehot_commands()
 
-    def _handle_onehot_commands(self) -> None:
-        """Handle onehot command generation."""
+    def _sample_onehot_commands(self) -> None:
+        """Sample commands as a one-hot vector.
+        
+        Randomly selects one command index to be 1.0, all others are 0.0.
+        This is used when onehot_mode: true is set in the config.
+        """
+        # Reset all commands to 0
+        self.commands = np.zeros(self.num_commands, dtype=np.float64)
+        
+        # Randomly select one index to be active
+        selected_idx = np.random.randint(self.num_commands)
+        self.commands[selected_idx] = 1.0
+
+    def _handle_legacy_onehot_commands(self) -> None:
+        """Handle legacy onehot command generation (when 'onehot' is in name)."""
         onehot_specs = [spec for spec in self.command_specs if "onehot" in spec.name]
         if onehot_specs:
             # Convert to onehot encoding
@@ -294,6 +320,34 @@ class CommandManager:
         except ValueError as e:
             raise ValueError(
                 f"Command '{name}' not found. Available: {self.command_names}"
+            ) from e
+
+    def set_onehot_by_index(self, active_index: int) -> None:
+        """Set commands as a one-hot vector with the specified index active.
+        
+        Args:
+            active_index: Index of the command to set to 1.0 (others become 0.0)
+        """
+        if not (0 <= active_index < self.num_commands):
+            raise IndexError(
+                f"Index {active_index} out of range [0, {self.num_commands})"
+            )
+        
+        self.commands = np.zeros(self.num_commands, dtype=np.float64)
+        self.commands[active_index] = 1.0
+
+    def set_onehot_by_name(self, active_name: str) -> None:
+        """Set commands as a one-hot vector with the named command active.
+        
+        Args:
+            active_name: Name of the command to set to 1.0 (others become 0.0)
+        """
+        try:
+            index = self.command_names.index(active_name)
+            self.set_onehot_by_index(index)
+        except ValueError as e:
+            raise ValueError(
+                f"Command '{active_name}' not found. Available: {self.command_names}"
             ) from e
 
     def get_command_by_name(self, name: str) -> float:

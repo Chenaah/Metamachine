@@ -760,6 +760,8 @@ def play_checkpoint(
     real_robot: bool = False,
     deterministic: bool = True,
     verbose: bool = True,
+    commands: Optional[dict] = None,
+    disable_resampling: bool = False,
 ) -> dict:
     """Play/evaluate a trained policy from a checkpoint.
     
@@ -774,6 +776,11 @@ def play_checkpoint(
         real_robot: If True, deploy to real robot
         deterministic: If True, use deterministic policy (no exploration noise)
         verbose: If True, print episode statistics
+        commands: Optional dict of command values to set (e.g., {"turn_rate": 1.5}).
+            If provided, these commands will be set after each reset.
+            Use with disable_resampling=True to keep commands fixed.
+        disable_resampling: If True, disable automatic command resampling.
+            Useful when you want to test specific command values.
     
     Returns:
         dict: Statistics from the playback (rewards, lengths, etc.)
@@ -788,6 +795,35 @@ def play_checkpoint(
         
         # Deploy to real robot
         play_checkpoint("./logs/my_experiment", real_robot=True)
+        
+        # Test specific behavior (e.g., turn left)
+        play_checkpoint(
+            "./logs/my_experiment",
+            commands={"turn_rate": 1.5},      # Turn left
+            disable_resampling=True,           # Keep command fixed
+        )
+        
+        # Test going straight
+        play_checkpoint(
+            "./logs/my_experiment",
+            commands={"turn_rate": 0.0, "forward_speed": 0.5},
+            disable_resampling=True,
+        )
+        
+        # Test one-hot commands by index (for onehot_turning config)
+        # 0=straight, 1=left, 2=right
+        play_checkpoint(
+            "./logs/my_experiment",
+            commands={"_onehot_index": 1},    # Turn left mode
+            disable_resampling=True,
+        )
+        
+        # Test one-hot commands by name
+        play_checkpoint(
+            "./logs/my_experiment",
+            commands={"_onehot_name": "cmd_right"},  # Turn right mode
+            disable_resampling=True,
+        )
     """
     import numpy as np
     
@@ -802,12 +838,20 @@ def play_checkpoint(
     if model is None:
         raise ValueError("No model checkpoint found to play")
     
+    # Disable command resampling if requested
+    if disable_resampling:
+        _disable_command_resampling(env)
+    
     print(f"\n{'=' * 60}")
     print(f"Playing Policy")
     print(f"{'=' * 60}")
     print(f"  Episodes: {'infinite' if num_episodes == 0 else num_episodes}")
     print(f"  Deterministic: {deterministic}")
     print(f"  Real robot: {real_robot}")
+    if commands:
+        print(f"  Commands: {commands}")
+    if disable_resampling:
+        print(f"  Command resampling: DISABLED")
     print(f"{'=' * 60}\n")
     
     # Run episodes
@@ -818,6 +862,13 @@ def play_checkpoint(
     try:
         while num_episodes == 0 or episode_count < num_episodes:
             obs, info = env.reset()
+            
+            # Set commands after reset if specified
+            if commands:
+                _set_commands(env, commands, verbose=verbose and episode_count == 0)
+                # Get updated observation with new commands
+                obs = _get_observation_with_commands(env)
+            
             episode_reward = 0
             episode_length = 0
             done = False
@@ -853,6 +904,7 @@ def play_checkpoint(
         "mean_length": np.mean(episode_lengths) if episode_lengths else 0,
         "episode_rewards": episode_rewards,
         "episode_lengths": episode_lengths,
+        "commands": commands,
     }
     
     if verbose and episode_rewards:
@@ -862,7 +914,140 @@ def play_checkpoint(
         print(f"  Mean Reward: {stats['mean_reward']:.2f} ± {stats['std_reward']:.2f}")
         print(f"  Min/Max Reward: {stats['min_reward']:.2f} / {stats['max_reward']:.2f}")
         print(f"  Mean Episode Length: {stats['mean_length']:.1f}")
+        if commands:
+            print(f"  Commands used: {commands}")
         print(f"{'=' * 60}")
     
     return stats
+
+
+def _set_commands(env, commands: dict, verbose: bool = False) -> None:
+    """Set command values on the environment.
+    
+    Args:
+        env: The environment with a state and command_manager
+        commands: Dict mapping command names to values, or special keys:
+            - "_onehot_index": int - Set one-hot by index (0, 1, 2, ...)
+            - "_onehot_name": str - Set one-hot by name (e.g., "cmd_left")
+            - Regular keys: Set individual command values
+        verbose: If True, print the commands being set
+    
+    Example:
+        # Set individual commands
+        _set_commands(env, {"turn_rate": 1.5, "forward_speed": 0.5})
+        
+        # Set one-hot by index (0=straight, 1=left, 2=right)
+        _set_commands(env, {"_onehot_index": 1})  # Turn left
+        
+        # Set one-hot by name
+        _set_commands(env, {"_onehot_name": "cmd_left"})
+    """
+    # Try to access command manager through different paths
+    command_manager = None
+    
+    # Path 1: env.state.command_manager
+    if hasattr(env, 'state') and hasattr(env.state, 'command_manager'):
+        command_manager = env.state.command_manager
+    # Path 2: env._command_manager
+    elif hasattr(env, '_command_manager'):
+        command_manager = env._command_manager
+    # Path 3: env.command_manager
+    elif hasattr(env, 'command_manager'):
+        command_manager = env.command_manager
+    
+    if command_manager is None:
+        if verbose:
+            print("[Warning] Could not find command manager, commands not set")
+        return
+    
+    # Handle special one-hot commands
+    if "_onehot_index" in commands:
+        idx = int(commands["_onehot_index"])
+        if hasattr(command_manager, 'set_onehot_by_index'):
+            command_manager.set_onehot_by_index(idx)
+            if verbose:
+                names = getattr(command_manager, 'command_names', [])
+                name = names[idx] if idx < len(names) else f"index_{idx}"
+                print(f"  Set one-hot command: index={idx} ({name})")
+        else:
+            # Fallback: manually set one-hot
+            for i in range(command_manager.num_commands):
+                command_manager.set_command(i, 1.0 if i == idx else 0.0)
+            if verbose:
+                print(f"  Set one-hot command: index={idx}")
+        return
+    
+    if "_onehot_name" in commands:
+        name = commands["_onehot_name"]
+        if hasattr(command_manager, 'set_onehot_by_name'):
+            command_manager.set_onehot_by_name(name)
+            if verbose:
+                print(f"  Set one-hot command: {name}")
+        else:
+            # Fallback: find index and set manually
+            try:
+                idx = command_manager.command_names.index(name)
+                for i in range(command_manager.num_commands):
+                    command_manager.set_command(i, 1.0 if i == idx else 0.0)
+                if verbose:
+                    print(f"  Set one-hot command: {name}")
+            except ValueError:
+                if verbose:
+                    print(f"  [Warning] Command '{name}' not found")
+        return
+    
+    # Set each command by name (regular mode)
+    for cmd_name, cmd_value in commands.items():
+        try:
+            command_manager.set_command_by_name(cmd_name, cmd_value)
+            if verbose:
+                print(f"  Set command '{cmd_name}' = {cmd_value}")
+        except (ValueError, KeyError) as e:
+            if verbose:
+                print(f"  [Warning] Could not set command '{cmd_name}': {e}")
+
+
+def _disable_command_resampling(env) -> None:
+    """Disable automatic command resampling on the environment.
+    
+    Args:
+        env: The environment with a command_manager
+    """
+    # Try to access command manager through different paths
+    command_manager = None
+    
+    if hasattr(env, 'state') and hasattr(env.state, 'command_manager'):
+        command_manager = env.state.command_manager
+    elif hasattr(env, '_command_manager'):
+        command_manager = env._command_manager
+    elif hasattr(env, 'command_manager'):
+        command_manager = env.command_manager
+    
+    if command_manager is not None:
+        # Set resampling interval to 0 or very large number to disable
+        command_manager.resampling_interval = 0
+
+
+def _get_observation_with_commands(env):
+    """Get observation from environment after commands have been updated.
+    
+    This is needed because the observation may include command values,
+    and we need to refresh it after setting new commands.
+    
+    Args:
+        env: The environment
+        
+    Returns:
+        Updated observation array
+    """
+    # Try to get fresh observation from state
+    if hasattr(env, 'state') and hasattr(env.state, 'get_observation'):
+        return env.state.get_observation(insert=False, reset=False)
+    
+    # Fallback: return observation space sample (not ideal but safe)
+    # The next step will get the correct observation anyway
+    if hasattr(env, '_last_obs'):
+        return env._last_obs
+    
+    return env.observation_space.sample()
 

@@ -514,6 +514,117 @@ class WindowedDisplacementEfficiencyComponent(RewardComponent):
         self.pos_history = []
 
 
+class OneHotTurningComponent(RewardComponent):
+    """
+    Simple turning reward based on one-hot command vector.
+    
+    Uses a 3D one-hot command vector to determine behavior:
+    - [1, 0, 0] = go straight: penalize angular velocity (want ~0)
+    - [0, 1, 0] = turn left: reward positive angular velocity
+    - [0, 0, 1] = turn right: reward negative angular velocity
+    
+    Angular velocity is computed as dot product of ang_vel_body and projected_gravity.
+    Rewards are normalized to similar scale across all modes.
+    
+    Parameters (in params dict):
+        max_ang_vel: Maximum angular velocity for clipping (default: 3.0)
+        straight_sigma: Sigma for gaussian penalty when going straight (default: 0.5)
+        command_names: List of 3 command names for [straight, left, right] 
+                      (default: ["cmd_straight", "cmd_left", "cmd_right"])
+    
+    Example YAML configuration:
+        - name: turning_reward
+          type: onehot_turning
+          weight: 0.5
+          params:
+            max_ang_vel: 3.0
+            straight_sigma: 0.5
+            command_names: ["cmd_straight", "cmd_left", "cmd_right"]
+    """
+
+    def calculate(self, state, calculator) -> float:
+        max_ang_vel = self.params.get("max_ang_vel", 3.0)
+        straight_sigma = self.params.get("straight_sigma", 0.5)
+        command_names = self.params.get(
+            "command_names", ["cmd_straight", "cmd_left", "cmd_right"]
+        )
+        
+        # Get commands (one-hot vector)
+        try:
+            cmd_straight = state.get_command_by_name(command_names[0])
+            cmd_left = state.get_command_by_name(command_names[1])
+            cmd_right = state.get_command_by_name(command_names[2])
+        except (AttributeError, ValueError):
+            # Fallback: try to get from state.commands array
+            commands = getattr(state, 'commands', np.array([1.0, 0.0, 0.0]))
+            if len(commands) >= 3:
+                cmd_straight, cmd_left, cmd_right = commands[0], commands[1], commands[2]
+            else:
+                cmd_straight, cmd_left, cmd_right = 1.0, 0.0, 0.0
+        
+        # Compute angular velocity around gravity axis
+        # Positive = turning left (counter-clockwise when viewed from above)
+        # Negative = turning right (clockwise when viewed from above)
+        accurate_projected_gravity = quat_rotate_inverse(
+            state.accurate_quat, calculator.gravity_vec
+        )
+        ang_vel = np.dot(state.accurate_ang_vel_body, -accurate_projected_gravity)
+        
+        # Compute reward based on mode
+        # All rewards are normalized to [0, 1] range for similar scale
+        
+        if cmd_left > 0.5:
+            # Turn left mode: reward positive angular velocity
+            # Clip and normalize to [0, 1]
+            reward = np.clip(ang_vel, 0, max_ang_vel) / max_ang_vel
+            
+        elif cmd_right > 0.5:
+            # Turn right mode: reward negative angular velocity
+            # Clip and normalize to [0, 1]
+            reward = np.clip(-ang_vel, 0, max_ang_vel) / max_ang_vel
+            
+        else:
+            # Straight mode: penalize angular velocity (want it close to 0)
+            # Use gaussian-like reward: exp(-ang_vel^2 / sigma^2)
+            reward = np.exp(-ang_vel**2 / (straight_sigma**2))
+        
+        return reward
+
+
+class OneHotForwardComponent(RewardComponent):
+    """
+    Forward velocity reward that works with one-hot turning commands.
+    
+    Always rewards forward velocity, regardless of turning mode.
+    This ensures the robot keeps moving forward while turning.
+    
+    Parameters (in params dict):
+        target_velocity: Target forward velocity (default: 0.5)
+        tracking_sigma: Sigma for tracking reward (default: 0.25)
+    
+    Example YAML configuration:
+        - name: forward_reward
+          type: onehot_forward
+          weight: 0.6
+          params:
+            target_velocity: 0.5
+            tracking_sigma: 0.25
+    """
+
+    def calculate(self, state, calculator) -> float:
+        target_vel = self.params.get("target_velocity", 0.5)
+        tracking_sigma = self.params.get("tracking_sigma", 0.25)
+        
+        # Get forward velocity in body frame projected onto forward direction
+        projected_forward_vel = np.dot(
+            state.accurate_vel_body, calculator.projected_forward_vec
+        )
+        
+        # Exponential tracking reward
+        lin_vel_error = np.square(target_vel - projected_forward_vel)
+        return np.exp(-lin_vel_error / tracking_sigma)
+
+
 # Component registry for easy lookup
 COMPONENT_REGISTRY = {
     "linear_velocity_tracking": LinearVelocityTrackingComponent,
@@ -537,6 +648,8 @@ COMPONENT_REGISTRY = {
     "tripod_jump": TripodJumpComponent,
     "action_rate": ActionRateComponent,
     "windowed_displacement_efficiency": WindowedDisplacementEfficiencyComponent,
+    "onehot_turning": OneHotTurningComponent,
+    "onehot_forward": OneHotForwardComponent,
 }
 
 
