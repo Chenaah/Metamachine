@@ -1,0 +1,187 @@
+# Real Robot Configuration - Three Modules
+# 
+# This config file works for BOTH simulation and real robot deployment.
+# Set `environment.mode` to switch between modes:
+#   - mode: sim   -> Uses MetaMachine (simulation)
+#   - mode: real  -> Uses RealMetaMachine (ESP32 hardware)
+#
+# The same config ensures consistent behavior between sim and real.
+
+_base: basic_quadruped  # Inherit common settings
+
+# =============================================================================
+# Environment Mode
+# =============================================================================
+environment:
+  mode: real            # "sim" or "real" - controls which environment class is used
+  num_envs: 1           # Real robot always uses 1 environment
+
+# =============================================================================
+# Morphology (used by simulation, defines expected structure)
+# =============================================================================
+morphology:
+  robot_type: modular_legs
+  configuration: [0,1,0,0,    # Module connections for simulation
+                  0,3,0,0]
+
+# =============================================================================
+# Real Robot Hardware Configuration
+# =============================================================================
+real:
+  # CRITICAL: Define expected module IDs and their order
+  # action[0] -> module 0
+  # action[1] -> module 1  
+  # action[2] -> module 2
+  module_ids: [0, 1, 2]
+  
+  # Network configuration
+  listen_port: 6666       # Port to receive sensor data from ESP32
+  command_port: 6667      # Port to send commands to ESP32
+  device_timeout: 2.0     # Seconds before module considered inactive
+  
+  # Control features
+  enable_filter: true     # Enable ESP32-side low-pass filter
+  
+  # Dashboard (optional Rich terminal UI)
+  enable_dashboard: true
+  
+  # Optional: Custom module names for dashboard display
+  # module_names:
+  #   0: "front_left"
+  #   1: "front_right"
+  #   2: "back"
+
+# =============================================================================
+# Control Interface
+# =============================================================================
+control:
+  dt: 0.05                # Control timestep (20 Hz)
+  num_actions: 3          # Number of actuated joints (must match len(module_ids))
+  action_scale: 1.0
+  symmetric_limit: 0.8
+  
+  # PD gains (shared between sim and real)
+  kp: 8.0
+  kd: 0.2
+  
+  # Initial/default positions
+  default_dof_pos: [0, -0.5, 0.5]
+  
+  # Action filtering
+  filter:
+    enabled: true
+    cutoff_freq: 3.0
+  filter_action: true
+
+# =============================================================================
+# Observation
+# =============================================================================
+observation:
+  torso_node_id: 0
+  
+  # Modular observation mode (recommended for real robots)
+  modular:
+    enabled: true
+    num_modules: 3
+    main_module_index: 0    # Use module 0 for global observations
+    
+    per_module_components:
+      - name: projected_gravities
+        index_type: element
+      - name: gyros
+        index_type: element
+    
+    global_components:
+      - name: dof_pos
+      - name: dof_vel
+      - name: last_action
+
+  clip_observations: 100.0
+  include_history_steps: 3
+  
+  # Reference vectors
+  projected_forward_vec: [0.0, 0.998583661722923, -0.05320404627506199]
+  projected_upward_vec: [0, 0.05320404627506199, 0.998583661722923]
+
+# =============================================================================
+# Task Configuration
+# =============================================================================
+task:
+  reward_components:
+    - name: locomotion_efficiency
+      type: windowed_displacement_efficiency
+      weight: 1.0
+      params:
+        window_size: 100
+        speed_weight: 1.0
+        efficiency_weight: 0.5
+        use_weld_cluster: true
+
+  termination_conditions:
+    termination_strategy: null
+    max_episode_steps: 1000
+
+  commands:
+    resampling_interval: 200
+    dimensions:
+      forward_speed:
+        type: uniform
+        range: [-0.5, 0.5]
+        initial_value: 0.3
+
+# =============================================================================
+# Simulation Settings (only used when mode: sim)
+# =============================================================================
+simulation:
+  mj_dt: 0.025
+  render: true
+  render_size: [1024, 720]
+  tn_constraint: true
+  latency_scheme: 0
+  auto_generate_assets: false
+  random_latency_scheme: true
+  noisy_observations: true
+  obs_noise_std: 0.2
+  noisy_actions: true
+  action_noise_std: 0.1
+  render_mode: 'mp4'
+  video_record_interval: 100
+  video_name_pattern: "episode_{episode}_three_modules"
+
+# =============================================================================
+# Initialization
+# =============================================================================
+initialization:
+  init_pos: [0, 0, 0.2]
+  init_quat: [0.99875534, 0.02721209, 0.01652124, -0.03839699]
+  noisy_init: false
+  randomize_orientation: false
+  fully_randomize_orientation: false
+  randomize_ini_vel: false
+
+# =============================================================================
+# Randomization (only used when mode: sim)
+# =============================================================================
+randomization:
+  mass:
+    enabled: true
+    percentage: 0.2
+    offset: 0.1
+  friction:
+    enabled: true
+    range: [0.4, 0.8]
+    detailed_range: [[0.4, 0.8], [0.4, 0.8]]
+  damping:
+    enabled: true
+    range: [0.02, 0.2]
+    armature_range: [0.01, 0.05]
+
+# =============================================================================
+# Logging
+# =============================================================================
+logging:
+  create_log_dir: true
+  robot_data_dir: null      # Set to a path to log real robot data
+  log_raw_data: false       # Enable to log all sensor data to file
+  print_data: false
+

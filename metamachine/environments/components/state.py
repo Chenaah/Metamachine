@@ -1383,6 +1383,8 @@ class State:
         self.derived.projected_gravities = [
             quat_rotate_inverse(quat, self.gravity_vec) for quat in self.raw.quats
         ]
+        if not self.derived.projected_gravities:
+            print("Warning: No projected gravities available")
 
         # Heading
         forward = quat_apply(self.raw.quat, self.forward_vec)
@@ -1620,6 +1622,7 @@ class State:
         for module_idx in module_indices:
             module_obs_parts = []
             for component in self.modular_components:
+                # print(f"Component: {component.name}")
                 try:
                     data = component.get_data_for_module(self, module_idx)
                     flattened_data = np.asarray(data).flatten()
