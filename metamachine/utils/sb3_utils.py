@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import pdb
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Type, Union
 
 # Lazy imports for optional SB3 dependency
@@ -49,6 +50,8 @@ __all__ = [
     "SB3Trainer",
     "load_from_checkpoint",
     "play_checkpoint",
+    "continue_training",
+    "compare_configs",
 ]
 
 
@@ -498,6 +501,10 @@ class SB3Trainer:
         path: str,
         env: "gym.Env",
         exp_name: str = "Continued Training",
+        new_log_dir: Optional[str] = None,
+        save_original_config: bool = True,
+        save_checkpoint_metadata: bool = True,
+        source_log_dir: Optional[str] = None,
         **kwargs,
     ) -> "SB3Trainer":
         """Load a model and create a trainer for continued training.
@@ -506,6 +513,10 @@ class SB3Trainer:
             path: Path to the saved model
             env: Environment to use
             exp_name: Experiment name for new logs
+            new_log_dir: Directory for new logs (defaults to env._log_dir or ./logs)
+            save_original_config: If True, copy source config.yaml into new log dir
+            save_checkpoint_metadata: If True, write checkpoint_metadata.yaml into new log dir
+            source_log_dir: Override for where to look for original config/checkpoints
             **kwargs: Additional kwargs
         
         Returns:
@@ -536,7 +547,14 @@ class SB3Trainer:
         trainer.env = env
         trainer.exp_name = exp_name
         trainer.model = model
-        trainer.log_dir = getattr(env, "_log_dir", f"./logs/{exp_name.replace(' ', '_').lower()}")
+        trainer.log_dir = new_log_dir or getattr(
+            env,
+            "_log_dir",
+            f"./logs/{exp_name.replace(' ', '_').lower()}",
+        )
+        os.makedirs(trainer.log_dir, exist_ok=True)
+        if hasattr(env, "_log_dir"):
+            env._log_dir = trainer.log_dir
         trainer.checkpoint_freq = kwargs.get("checkpoint_freq", 100000)
         
         # Setup callbacks for continued training
@@ -547,6 +565,24 @@ class SB3Trainer:
             log_dir=trainer.log_dir,
             checkpoint_freq=trainer.checkpoint_freq,
         )
+
+        source_log_path = None
+        if source_log_dir is not None:
+            source_log_path = Path(source_log_dir)
+        else:
+            source_log_path = Path(path).parent
+        if source_log_path is not None and not source_log_path.exists():
+            source_log_path = None
+
+        if save_original_config:
+            _copy_source_config(source_log_path, trainer.log_dir)
+        if save_checkpoint_metadata:
+            _write_checkpoint_metadata(
+                trainer.log_dir,
+                model=model,
+                checkpoint_path=path,
+                source_log_dir=source_log_path,
+            )
         
         return trainer
     
@@ -745,7 +781,8 @@ def _load_sb3_model(checkpoint_path: str, env, device: str = "auto"):
             model = algo_cls.load(checkpoint_path, env=env, device=device)
             print(f"[Checkpoint] Loaded model (algorithm: {algo_name})")
             return model
-        except Exception:
+        except Exception as e:
+            print(f"[Checkpoint] Failed to load with {algo_name}: {e}")
             continue
     
     raise ValueError(f"Could not load model from {checkpoint_path}. "
@@ -1051,3 +1088,527 @@ def _get_observation_with_commands(env):
     
     return env.observation_space.sample()
 
+
+# =============================================================================
+# Continue Training / Fine-tuning Utilities
+# =============================================================================
+
+def compare_configs(
+    old_config: Union[str, dict, object],
+    new_config: Union[str, dict, object],
+    show_unchanged: bool = False,
+    color_output: bool = True,
+) -> dict:
+    """Compare two configurations and show differences.
+    
+    Recursively compares two configuration objects/dicts and displays
+    the differences in a readable format.
+    
+    Args:
+        old_config: Original config (path, dict, or config object)
+        new_config: New config (path, dict, or config object)
+        show_unchanged: If True, also show unchanged values
+        color_output: If True, use ANSI colors for terminal output
+    
+    Returns:
+        dict: Dictionary with keys 'added', 'removed', 'changed', 'unchanged'
+              containing the respective config keys and values
+    
+    Example:
+        # Compare config files
+        diff = compare_configs(
+            "./logs/old_experiment/config.yaml",
+            "./configs/new_config.yaml"
+        )
+        
+        # Check specific changes
+        if "task.reward_components" in diff["changed"]:
+            print("Reward function changed!")
+    """
+    # Load configs if paths are provided
+    old_dict = _config_to_dict(old_config)
+    new_dict = _config_to_dict(new_config)
+    
+    # Flatten dicts for comparison
+    old_flat = _flatten_dict(old_dict)
+    new_flat = _flatten_dict(new_dict)
+    
+    # Find differences
+    all_keys = set(old_flat.keys()) | set(new_flat.keys())
+    
+    added = {}
+    removed = {}
+    changed = {}
+    unchanged = {}
+    
+    for key in sorted(all_keys):
+        old_val = old_flat.get(key)
+        new_val = new_flat.get(key)
+        
+        if key not in old_flat:
+            added[key] = new_val
+        elif key not in new_flat:
+            removed[key] = old_val
+        elif old_val != new_val:
+            changed[key] = {"old": old_val, "new": new_val}
+        else:
+            unchanged[key] = old_val
+    
+    # Print comparison
+    _print_config_diff(added, removed, changed, unchanged, show_unchanged, color_output)
+    
+    return {
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "unchanged": unchanged,
+    }
+
+
+def _config_to_dict(config) -> dict:
+    """Convert config to dictionary."""
+    if isinstance(config, str):
+        # It's a path - load the config
+        from pathlib import Path
+        path = Path(config)
+        
+        if path.suffix in ['.yaml', '.yml']:
+            import yaml
+            with open(path, 'r') as f:
+                return yaml.safe_load(f)
+        elif path.suffix == '.json':
+            import json
+            with open(path, 'r') as f:
+                return json.load(f)
+        else:
+            raise ValueError(f"Unknown config format: {path.suffix}")
+    
+    elif isinstance(config, dict):
+        return config
+    
+    elif hasattr(config, 'to_dict'):
+        return config.to_dict()
+    
+    elif hasattr(config, '__dict__'):
+        # Config object - convert to dict recursively
+        return _object_to_dict(config)
+    
+    else:
+        raise ValueError(f"Cannot convert {type(config)} to dict")
+
+
+def _object_to_dict(obj, seen=None) -> dict:
+    """Recursively convert object attributes to dictionary."""
+    if seen is None:
+        seen = set()
+    
+    obj_id = id(obj)
+    if obj_id in seen:
+        return "<circular reference>"
+    seen.add(obj_id)
+    
+    if isinstance(obj, dict):
+        return {k: _object_to_dict(v, seen) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_object_to_dict(item, seen) for item in obj]
+    elif hasattr(obj, '__dict__'):
+        result = {}
+        for key, value in obj.__dict__.items():
+            if not key.startswith('_'):  # Skip private attributes
+                result[key] = _object_to_dict(value, seen)
+        return result
+    else:
+        return obj
+
+
+def _flatten_dict(d: dict, parent_key: str = '', sep: str = '.') -> dict:
+    """Flatten a nested dictionary."""
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(_flatten_dict(v, new_key, sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
+
+
+def _print_config_diff(
+    added: dict,
+    removed: dict,
+    changed: dict,
+    unchanged: dict,
+    show_unchanged: bool,
+    color_output: bool,
+) -> None:
+    """Print config differences in a readable format."""
+    # ANSI color codes
+    if color_output:
+        GREEN = "\033[92m"
+        RED = "\033[91m"
+        YELLOW = "\033[93m"
+        BLUE = "\033[94m"
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+    else:
+        GREEN = RED = YELLOW = BLUE = RESET = BOLD = ""
+    
+    print(f"\n{BOLD}{'=' * 60}")
+    print("Configuration Comparison")
+    print(f"{'=' * 60}{RESET}\n")
+    
+    # Summary
+    print(f"  {GREEN}Added:{RESET} {len(added)} | "
+          f"{RED}Removed:{RESET} {len(removed)} | "
+          f"{YELLOW}Changed:{RESET} {len(changed)} | "
+          f"{BLUE}Unchanged:{RESET} {len(unchanged)}")
+    print()
+    
+    # Added
+    if added:
+        print(f"{GREEN}{BOLD}[+] Added ({len(added)}):{RESET}")
+        for key, value in added.items():
+            value_str = _format_value(value)
+            print(f"  {GREEN}+ {key}: {value_str}{RESET}")
+        print()
+    
+    # Removed
+    if removed:
+        print(f"{RED}{BOLD}[-] Removed ({len(removed)}):{RESET}")
+        for key, value in removed.items():
+            value_str = _format_value(value)
+            print(f"  {RED}- {key}: {value_str}{RESET}")
+        print()
+    
+    # Changed
+    if changed:
+        print(f"{YELLOW}{BOLD}[~] Changed ({len(changed)}):{RESET}")
+        for key, values in changed.items():
+            old_str = _format_value(values["old"])
+            new_str = _format_value(values["new"])
+            print(f"  {YELLOW}~ {key}:{RESET}")
+            print(f"      {RED}old: {old_str}{RESET}")
+            print(f"      {GREEN}new: {new_str}{RESET}")
+        print()
+    
+    # Unchanged (optional)
+    if show_unchanged and unchanged:
+        print(f"{BLUE}{BOLD}[=] Unchanged ({len(unchanged)}):{RESET}")
+        for key, value in list(unchanged.items())[:20]:  # Limit output
+            value_str = _format_value(value)
+            print(f"  {BLUE}= {key}: {value_str}{RESET}")
+        if len(unchanged) > 20:
+            print(f"  {BLUE}... and {len(unchanged) - 20} more{RESET}")
+        print()
+
+
+def _format_value(value, max_length: int = 60) -> str:
+    """Format a value for display."""
+    if isinstance(value, (list, tuple)) and len(value) > 5:
+        return f"[{value[0]}, {value[1]}, ... ({len(value)} items)]"
+    
+    value_str = repr(value)
+    if len(value_str) > max_length:
+        return value_str[:max_length - 3] + "..."
+    return value_str
+
+
+def continue_training(
+    log_dir: str,
+    new_config: Optional[str] = None,
+    checkpoint: Optional[str] = "latest",
+    total_timesteps: int = 1000000,
+    exp_name: Optional[str] = None,
+    new_log_dir: Optional[str] = None,
+    show_config_diff: bool = True,
+    confirm_diff: bool = True,
+    reset_timesteps: bool = False,
+    checkpoint_freq: int = 100000,
+    render_mode: str = "mp4",
+    device: str = "auto",
+) -> "SB3Trainer":
+    """Continue training from an existing checkpoint with optional new config.
+    
+    This function is designed for fine-tuning scenarios where you want to:
+    1. Load a pretrained model from a log directory
+    2. Optionally use a new/modified config file
+    3. See differences between old and new configs
+    4. Continue training with the new settings
+    
+    Args:
+        log_dir: Path to the original training log directory
+        new_config: Path to new config file (None = use original config)
+        checkpoint: Which checkpoint to load ('latest', 'final', step number)
+        total_timesteps: Additional timesteps to train
+        exp_name: New experiment name (None = auto-generate with 'finetune_' prefix)
+        new_log_dir: Directory for new logs (None = create new timestamped dir)
+        show_config_diff: If True, show config differences before training
+        confirm_diff: If True, ask for confirmation if config differs significantly
+        reset_timesteps: If True, reset step counter (start from 0)
+        checkpoint_freq: Save checkpoint every N steps
+        render_mode: Render mode for new environment
+        device: Device for training
+    
+    Returns:
+        SB3Trainer: Trainer ready for continued training (call .learn())
+    
+    Example:
+        # Simple continue with same config
+        trainer = continue_training("./logs/my_experiment")
+        trainer.learn(total_timesteps=500000)
+        
+        # Fine-tune with new config
+        trainer = continue_training(
+            "./logs/my_experiment",
+            new_config="./configs/finetuning_config.yaml",
+            total_timesteps=200000,
+            exp_name="Finetuned Model",
+        )
+        trainer.learn(total_timesteps=200000)
+        
+        # Continue from specific checkpoint
+        trainer = continue_training(
+            "./logs/my_experiment",
+            checkpoint=500000,  # Load rl_model_500000_steps.zip
+        )
+        trainer.learn(total_timesteps=300000)
+    """
+    from pathlib import Path
+    from datetime import datetime
+    
+    log_path = Path(log_dir)
+    
+    # Validate log directory
+    if not log_path.exists():
+        raise FileNotFoundError(f"Log directory not found: {log_dir}")
+    
+    old_config_path = log_path / "config.yaml"
+    if not old_config_path.exists():
+        raise FileNotFoundError(f"Config not found in log directory: {old_config_path}")
+    
+    print(f"\n{'=' * 60}")
+    print("Continue Training / Fine-tuning")
+    print(f"{'=' * 60}")
+    print(f"  Source: {log_dir}")
+    print(f"  Checkpoint: {checkpoint}")
+    print(f"  New config: {new_config or '(same as original)'}")
+    print(f"{'=' * 60}\n")
+    
+    # Load original config
+    from metamachine.environments.configs.config_registry import ConfigRegistry
+    old_cfg = ConfigRegistry.create_from_file(str(old_config_path))
+    
+    # Determine which config to use
+    if new_config is not None:
+        if not os.path.exists(new_config):
+            raise FileNotFoundError(f"New config not found: {new_config}")
+        
+        cfg = ConfigRegistry.create_from_file(new_config)
+        config_changed = True
+        
+        # Show config differences
+        if show_config_diff:
+            diff = compare_configs(str(old_config_path), new_config)
+            
+            # Check for significant changes
+            significant_changes = (
+                len(diff["added"]) > 0 or
+                len(diff["removed"]) > 0 or
+                any(k.startswith(("observation.", "control.num_actions"))
+                    for k in diff["changed"])
+            )
+            
+            if confirm_diff and significant_changes:
+                print("\n[Warning] Significant config changes detected!")
+                print("  This may cause issues if observation/action spaces changed.")
+                response = input("  Continue anyway? [y/N]: ").strip().lower()
+                if response != 'y':
+                    print("  Aborted.")
+                    raise KeyboardInterrupt("User cancelled due to config changes")
+    else:
+        cfg = old_cfg
+        config_changed = False
+        print("[Config] Using original config (no changes)")
+    
+    # Update render mode
+    cfg.simulation.render_mode = render_mode
+    cfg.simulation.render = render_mode != "none"
+    cfg.simulation.video_record_interval = 100 if render_mode == "mp4" else 0
+    
+    # Generate experiment name
+    if exp_name is None:
+        original_name = cfg.logging.get("experiment_name", "experiment")
+        exp_name = f"finetune_{original_name}"
+    
+    # Create new log directory
+    # if new_log_dir is None:
+    #     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #     base_dir = Path(log_dir).parent
+    #     new_log_dir = str(base_dir / f"{timestamp}l_{exp_name.replace(' ', '_').lower()}")
+    
+    # os.makedirs(new_log_dir, exist_ok=True)
+    
+    # Create environment with (possibly new) config
+    from metamachine.environments.env_sim import MetaMachine
+    env = MetaMachine(cfg)
+
+    if new_log_dir is None:
+        new_log_dir = env._log_dir
+    else:
+        # Override the environment's log directory
+        env._log_dir = new_log_dir
+    
+    print(f"\n[Environment] Created with {'new' if config_changed else 'original'} config")
+    print(f"  Action space: {env.action_space}")
+    print(f"  Observation space: {env.observation_space}")
+    print(f"  Log directory: {new_log_dir}")
+    
+    # Find and load checkpoint
+    checkpoint_path = _resolve_checkpoint_path(log_path, checkpoint)
+    
+    if checkpoint_path is None:
+        raise FileNotFoundError(f"No checkpoint found in {log_dir}")
+    
+    # Load the model
+    model = _load_sb3_model(checkpoint_path, env, device)
+    
+    print(f"\n[Model] Loaded from: {Path(checkpoint_path).name}")
+    print(f"  Previous timesteps: {model.num_timesteps:,}")
+    
+    # Create trainer wrapper
+    trainer = SB3Trainer.__new__(SB3Trainer)
+    trainer.env = env
+    trainer.exp_name = exp_name
+    trainer.model = model
+    trainer.log_dir = new_log_dir
+    trainer.checkpoint_freq = checkpoint_freq
+    
+    # Setup callbacks for continued training
+    trainer.callbacks = setup_sb3_training(
+        model,
+        env,
+        exp_name=exp_name,
+        log_dir=new_log_dir,
+        checkpoint_freq=checkpoint_freq,
+        show_progress_bar=True,
+    )
+    
+    # Save the new config to the log directory
+    _save_config_to_log_dir(cfg, new_log_dir, old_config_path if config_changed else None)
+    _write_checkpoint_metadata(
+        new_log_dir,
+        model=model,
+        checkpoint_path=checkpoint_path,
+        source_log_dir=log_path,
+    )
+    
+    print(f"\n[Ready] Trainer configured for continued training")
+    print(f"  New experiment: {exp_name}")
+    print(f"  Reset timesteps: {reset_timesteps}")
+    print(f"\n  Call trainer.learn(total_timesteps={total_timesteps}) to start")
+    
+    # Store settings for learn()
+    trainer._reset_timesteps = reset_timesteps
+    trainer._source_log_dir = log_dir
+    trainer._source_checkpoint = checkpoint_path
+    
+    return trainer
+
+
+def _save_config_to_log_dir(cfg, log_dir: str, original_config_path: Optional[Path] = None):
+    """Save config and optionally original config to log directory."""
+    import yaml
+    from pathlib import Path
+    
+    log_path = Path(log_dir)
+    
+    # save the original for reference
+    if original_config_path is not None:
+        import shutil
+        original_backup = log_path / "config_original.yaml"
+        shutil.copy(original_config_path, original_backup)
+        print(f"  Saved original config to: {original_backup}")
+
+
+def _copy_source_config(source_log_dir: Optional[Path], log_dir: str) -> Optional[Path]:
+    """Copy the source config.yaml into the new log directory for reference."""
+    if source_log_dir is None:
+        print("  [Config] Source log dir not found; skipping config backup")
+        return None
+
+    config_path = source_log_dir / "config.yaml"
+    if not config_path.exists():
+        print(f"  [Config] Source config not found at: {config_path}")
+        return None
+
+    import shutil
+    dest_path = Path(log_dir) / "config_original.yaml"
+    shutil.copy(config_path, dest_path)
+    print(f"  Saved source config to: {dest_path}")
+    return dest_path
+
+
+def _write_checkpoint_metadata(
+    log_dir: str,
+    model,
+    checkpoint_path: str,
+    source_log_dir: Optional[Path] = None,
+) -> Optional[Path]:
+    """Write checkpoint metadata to the log directory."""
+    from datetime import datetime
+    import yaml
+
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_path_obj = Path(checkpoint_path)
+    resolved_checkpoint = str(checkpoint_path_obj.resolve())
+
+    metadata = {
+        "source_log_dir": str(source_log_dir.resolve()) if source_log_dir else None,
+        "source_checkpoint": resolved_checkpoint,
+        "checkpoint_name": checkpoint_path_obj.name,
+        "checkpoint_steps": _extract_checkpoint_steps(checkpoint_path_obj.name),
+        "available_checkpoints": _collect_checkpoint_files(source_log_dir),
+        "algorithm": model.__class__.__name__,
+        "algorithm_module": model.__class__.__module__,
+        "num_timesteps": int(getattr(model, "num_timesteps", 0)),
+        "loaded_at": datetime.now().isoformat(),
+    }
+
+    metadata_path = log_path / "checkpoint_metadata.yaml"
+    with open(metadata_path, "w") as f:
+        yaml.safe_dump(metadata, f, default_flow_style=False, sort_keys=False)
+    print(f"  Saved checkpoint metadata to: {metadata_path}")
+    return metadata_path
+
+
+def _collect_checkpoint_files(source_log_dir: Optional[Path]) -> List[dict]:
+    """Collect checkpoint file metadata from a source log directory."""
+    if source_log_dir is None or not source_log_dir.exists():
+        return []
+
+    checkpoint_entries = []
+    step_checkpoints = sorted(source_log_dir.glob("rl_model_*_steps.zip"))
+    for checkpoint in step_checkpoints:
+        checkpoint_entries.append({
+            "file": checkpoint.name,
+            "steps": _extract_checkpoint_steps(checkpoint.name),
+        })
+
+    for name, tag in (("final_model.zip", "final"), ("best_model.zip", "best")):
+        path = source_log_dir / name
+        if path.exists():
+            checkpoint_entries.append({"file": name, "tag": tag})
+
+    return checkpoint_entries
+
+
+def _extract_checkpoint_steps(filename: str) -> Optional[int]:
+    """Extract step count from a checkpoint filename."""
+    import re
+
+    match = re.search(r"rl_model_(\d+)_steps\.zip$", filename)
+    if not match:
+        return None
+    return int(match.group(1))

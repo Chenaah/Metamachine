@@ -323,15 +323,49 @@ class Base(gym.Env, ABC):
             self.kb.set_normal_term()
 
     def _setup_logging(self) -> None:
-        """Setup logging directories and files."""
+        """Setup logging directories and files.
+        
+        Logging directory resolution (in priority order):
+        1. logging.log_dir: Use this exact directory (no timestamp added)
+        2. logging.create_log_dir=True: Create timestamped subdir under logging.data_dir
+        3. logging.create_log_dir=False: Use logging.data_dir directly (if set)
+        4. None: No logging directory
+        
+        This allows external code to set logging.log_dir to force a specific directory,
+        which is useful for hierarchical environments that need to coordinate logging.
+        """
         self._log_dir = None
-        if self.cfg.get("logging", {}).get("create_log_dir", False):
-            base_log_dir = self.cfg.logging.get("data_dir", "./logs")
+        logging_cfg = self.cfg.get("logging", {})
+        
+        # Priority 1: Direct log_dir specification (no timestamp, no subdirs)
+        if logging_cfg.get("log_dir"):
+            self._log_dir = logging_cfg.log_dir
+            os.makedirs(self._log_dir, exist_ok=True)
+            # Save config to this directory
+        # Priority 2: Create timestamped subdirectory
+        elif logging_cfg.get("create_log_dir", False):
+            base_log_dir = logging_cfg.get("data_dir", "./logs")
             base_log_dir = "./logs" if base_log_dir is None else base_log_dir
-            exp_name = self.cfg.logging.get("experiment_name", None)
+            exp_name = logging_cfg.get("experiment_name", None)
             self._log_dir = self.create_log_directory(base_log_dir, exp_name)
+        # Priority 3: Use data_dir directly (if set)
+        elif logging_cfg.get("data_dir", None):
+            self._log_dir = logging_cfg.get("data_dir", None)
+            os.makedirs(self._log_dir, exist_ok=True)
         else:
-            self._log_dir = self.cfg.logging.get("data_dir", None)
+            self._log_dir = None  # No logging directory
+            raise NotImplementedError("Logging directory setup failed.")
+        
+        self._save_config_to_log_dir()
+    
+    def _save_config_to_log_dir(self) -> None:
+        """Save configuration to log directory if it exists."""
+        if self._log_dir and os.path.isdir(self._log_dir):
+            config_path = os.path.join(self._log_dir, "config.yaml")
+            # Don't overwrite if config already exists (e.g., from parent env)
+            if not os.path.exists(config_path):
+                with open(config_path, "w") as f:
+                    OmegaConf.save(self.cfg, f)
 
     def create_log_directory(self, log_dir, exp_name: Optional[str] = None):
         """Create a log directory for saving logs with date and component information.
@@ -382,9 +416,5 @@ class Base(gym.Env, ABC):
         if not os.path.exists(self._log_dir):
             os.makedirs(self._log_dir)
 
-        # Save configuration file
-        config_path = os.path.join(self._log_dir, "config.yaml")
-        with open(config_path, "w") as f:
-            OmegaConf.save(self.cfg, f)
 
         return self._log_dir

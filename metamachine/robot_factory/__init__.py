@@ -27,7 +27,18 @@ Plugin System:
     >>> from metamachine.robot_factory import load_plugins_from
     >>> load_plugins_from("/path/to/private_plugins")
     >>> factory = get_robot_factory("lego_legs")  # Now available!
-
+    
+Random Generation:
+    The random generation API provides abstract classes for generating random
+    robot morphologies. Factory-specific implementations are in plugins:
+    
+    # Abstract classes (core)
+    >>> from metamachine.robot_factory import (
+    ...     ComponentBudget,
+    ...     ComponentDockRegistry,
+    ...     RandomGenerationCapability,
+    ... )
+    
 Copyright 2025 Chen Yu <chenyu@u.northwestern.edu>
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -62,6 +73,25 @@ from .morphology import (
     create_quadruped_graph,
 )
 
+# Import random generation API (abstract layer only)
+from .random_generation import (
+    # Dock system (generic)
+    ComponentDockRegistry,
+    DockGender,
+    DockSpec,
+    # Budget (generic base)
+    ComponentBudget,
+    # Generation (generic)
+    GenerationConfig,
+    GenerationMode,
+    BaseRandomGraphGenerator,
+    # Factory integration
+    RandomGenerationCapability,
+    # Utilities
+    graph_to_yaml_dict,
+    visualize_graph,
+)
+
 # Legacy compatibility imports
 from .modular_legs.meta_designer import ModularLegs
 
@@ -92,6 +122,17 @@ __all__ = [
     "RobotGraph",
     "create_tripod_graph",
     "create_quadruped_graph",
+    # Random generation (abstract layer)
+    "ComponentBudget",
+    "ComponentDockRegistry",
+    "DockGender",
+    "DockSpec",
+    "GenerationConfig",
+    "GenerationMode",
+    "BaseRandomGraphGenerator",
+    "RandomGenerationCapability",
+    "graph_to_yaml_dict",
+    "visualize_graph",
     # ModularLegs factory
     "ModularLegsFactory",
     "ModularLegsRobot",

@@ -48,6 +48,8 @@ __all__ = [
     "ProgressBarCallback",
     "load_from_checkpoint",
     "play_checkpoint",
+    "continue_training",
+    "compare_configs",
 ]
 
 # SB3 utilities (optional import - only available if stable-baselines3 is installed)
@@ -59,6 +61,8 @@ try:
         ProgressBarCallback,
         load_from_checkpoint,
         play_checkpoint,
+        continue_training,
+        compare_configs,
     )
 except ImportError:
     # SB3 not installed, provide placeholder
@@ -68,3 +72,5 @@ except ImportError:
     ProgressBarCallback = None
     load_from_checkpoint = None
     play_checkpoint = None
+    continue_training = None
+    compare_configs = None

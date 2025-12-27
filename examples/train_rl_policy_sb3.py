@@ -10,6 +10,11 @@ Usage:
     python train_rl_policy_sb3.py --timesteps 500000
     python train_rl_policy_sb3.py --config modular_quadruped
 
+    # Continue training / fine-tune from checkpoint
+    python train_rl_policy_sb3.py --continue ./logs/my_experiment
+    python train_rl_policy_sb3.py --continue ./logs/my_experiment --config new_config.yaml
+    python train_rl_policy_sb3.py --continue ./logs/my_experiment --timesteps 200000
+
     # Play/visualize a trained policy
     python train_rl_policy_sb3.py --play ./logs/my_experiment
     python train_rl_policy_sb3.py --play ./logs/my_experiment --checkpoint 200000
@@ -37,6 +42,11 @@ Examples:
     
     # Train with custom settings
     python train_rl_policy_sb3.py --config modular_quadruped --timesteps 500000
+    
+    # Continue training from checkpoint (fine-tuning)
+    python train_rl_policy_sb3.py --continue ./logs/my_experiment
+    python train_rl_policy_sb3.py --continue ./logs/my_experiment --config new_config.yaml
+    python train_rl_policy_sb3.py --continue ./logs/my_experiment --timesteps 200000
     
     # Play/visualize a trained policy
     python train_rl_policy_sb3.py --play ./logs/my_experiment
@@ -79,6 +89,16 @@ Examples:
         type=str,
         default="CrossQ",
         help="RL algorithm: CrossQ, SAC, PPO, TD3, TQC (default: CrossQ)"
+    )
+    
+    # Continue training / fine-tuning arguments
+    parser.add_argument(
+        "--continue", 
+        dest="continue_from",  # 'continue' is a Python keyword
+        type=str,
+        default=None,
+        metavar="LOG_DIR",
+        help="Continue training from a log directory (for fine-tuning)"
     )
     
     # Play mode arguments
@@ -138,7 +158,40 @@ def main():
         return
     
     # =========================================================================
-    # Training Mode
+    # Continue Training / Fine-tuning Mode
+    # =========================================================================
+    if args.continue_from:
+        print("=" * 60)
+        print("Continue Training / Fine-tuning Mode")
+        print("=" * 60)
+        
+        from metamachine.utils.sb3_utils import continue_training
+        
+        # Determine new config (if provided, otherwise use original)
+        new_config = None
+        if args.config != DEFAULT_CONFIG:  # User specified a config
+            if os.path.exists(args.config):
+                new_config = args.config
+        
+        trainer = continue_training(
+            log_dir=args.continue_from,
+            new_config=new_config,
+            checkpoint=args.checkpoint,
+            total_timesteps=args.timesteps,
+            exp_name=args.exp_name if args.exp_name != DEFAULT_EXP_NAME else None,
+            show_config_diff=True,
+            confirm_diff=True,
+        )
+        
+        trainer.learn(total_timesteps=args.timesteps)
+        trainer.save()
+        
+        print(f"\nFine-tuning complete! Logs saved to: {trainer.log_dir}")
+        print(f"To visualize: python train_rl_policy_sb3.py --play {trainer.log_dir}")
+        return
+    
+    # =========================================================================
+    # Training Mode (new training)
     # =========================================================================
     print("=" * 60)
     print("Training Mode - SB3Trainer")
