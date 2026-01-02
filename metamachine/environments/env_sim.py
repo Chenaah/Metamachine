@@ -1585,6 +1585,10 @@ class MetaMachine(Base, MujocoEnv):
         # Reload MuJoCo environment
         self.reload_model(self.xml_compiler.get_string())
 
+        # SAve reloaded model to log directory
+        if self._log_dir is not None:
+            self.xml_compiler.save(os.path.join(self._log_dir, "reloaded_robot_debug.xml"))
+
     def _apply_domain_randomization(self) -> None:
         """Apply domain randomization parameters."""
         # PD controller randomization

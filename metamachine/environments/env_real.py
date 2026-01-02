@@ -706,6 +706,14 @@ class RealMetaMachine(Base):
         
         time.sleep(0.5)
 
+    def _handle_input(self) -> None:
+        """Override base class to handle real robot keyboard input.
+        
+        This is called by Base.step() on every step to process keyboard input.
+        For real robots, we handle enable/disable/restart/calibrate commands.
+        """
+        self._check_input()
+
     def _check_input(self) -> None:
         """Handle keyboard input for real robot control."""
         if hasattr(self, 'kb') and self.kb.kbhit():

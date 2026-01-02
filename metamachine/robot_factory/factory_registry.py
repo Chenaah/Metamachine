@@ -622,8 +622,8 @@ def get_default_fine_model_cfg(robot_type: RobotType) -> dict[str, Any]:
         or robot_type == RobotType.CUSTOM.value
         or robot_type == "lego_legs"
     ):
-        # For lego_legs and other custom types, let the factory use its own defaults
-        return {}
+        # For lego_legs: use fine preset (high-fidelity meshes)
+        return {"preset": "fine"}
     else:
         # For unknown types, return empty dict to let factory use defaults
         logger.warning(f"No fine model config for robot type: {robot_type}, using factory defaults")
@@ -651,8 +651,8 @@ def get_default_draft_model_cfg(robot_type: RobotType) -> dict[str, Any]:
         or robot_type == RobotType.CUSTOM.value
         or robot_type == "lego_legs"
     ):
-        # For lego_legs and other custom types, let the factory use its own defaults
-        return {}
+        # For lego_legs: use draft preset (simple primitives for fast simulation)
+        return {"preset": "draft"}
     else:
         # For unknown types, return empty dict to let factory use defaults
         logger.warning(f"No draft model config for robot type: {robot_type}, using factory defaults")

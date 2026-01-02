@@ -130,6 +130,45 @@ class ComponentSpec:
         params.update(kwargs)
         return cls(component_type=ComponentType.ADAPTOR4, name=name, params=params)
     
+    @classmethod
+    def custom(
+        cls,
+        component_name: str,
+        name: Optional[str] = None,
+        docking_sites: Optional[list[str]] = None,
+        **kwargs,
+    ) -> "ComponentSpec":
+        """
+        Factory method to create a custom component.
+        
+        Use this to reference component definitions registered in the component registry,
+        like STICK_MF_COMPONENT which has different dock genders than the standard stick.
+        
+        Args:
+            component_name: Name of the registered component (e.g., "stick_mf")
+            name: Instance name for this component (e.g., "thigh0")
+            docking_sites: Override docking site names. If None, will be inferred from
+                          the component definition when the robot is built.
+            **kwargs: Additional parameters passed to the component builder
+            
+        Returns:
+            ComponentSpec configured for the custom component
+            
+        Example:
+            >>> # Create a stick with male/female docks
+            >>> graph.add_component(ComponentSpec.custom(
+            ...     "stick_mf", name="thigh0", length=0.24
+            ... ))
+        """
+        params = {"_component_name": component_name}  # Store for factory lookup
+        params.update(kwargs)
+        return cls(
+            component_type=ComponentType.CUSTOM,
+            name=name,
+            params=params,
+            docking_sites=docking_sites or [],
+        )
+    
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
         return {

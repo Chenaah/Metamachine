@@ -110,52 +110,35 @@ class XMLCompiler:
         tree.write(file, pretty_print=True, xml_declaration=False, encoding="utf-8")
 
     def get_mass_range(self, percentage=0.1):
-        # Get the mass range of the stick, top_hemi, bottom_hemi, and motor
+        """Get mass range for all geoms with name and mass attributes.
+        
+        Args:
+            percentage: Percentage variation for mass range (default 0.1 = ±10%)
+            
+        Returns:
+            dict: {geom_name: [min_mass, max_mass]} for all geoms with mass
+        """
         mass_range = {}
-        left_mass = self.root.xpath('//geom[@name="left0"]/@mass')[0]
-        mass_range["left"] = [
-            float(left_mass) * (1 - percentage),
-            float(left_mass) * (1 + percentage),
-        ]
-        right_mass = self.root.xpath('//geom[@name="right0"]/@mass')[0]
-        mass_range["right"] = [
-            float(right_mass) * (1 - percentage),
-            float(right_mass) * (1 + percentage),
-        ]
-        stick_mass = self.root.xpath('//geom[@name="stick0"]/@mass')[0]
-        mass_range["stick"] = [
-            float(stick_mass) * (1 - percentage),
-            float(stick_mass) * (1 + percentage),
-        ]
-
-        motor_list = self.root.xpath('//geom[@name="motor0"]/@mass')
-        if motor_list:
-            motor_mass = motor_list[0]
-            mass_range["motor"] = [
-                float(motor_mass) * (1 - percentage),
-                float(motor_mass) * (1 + percentage),
+        # Find all geoms that have both name and mass attributes
+        for geom in self.root.xpath('//geom[@name and @mass]'):
+            name = geom.get('name')
+            mass = float(geom.get('mass'))
+            mass_range[name] = [
+                mass * (1 - percentage),
+                mass * (1 + percentage),
             ]
-        battery_list = self.root.xpath('//geom[@name="battery0"]/@mass')
-        if battery_list:
-            battery_mass = battery_list[0]
-            mass_range["battery"] = [
-                float(battery_mass) * (1 - percentage),
-                float(battery_mass) * (1 + percentage),
-            ]
-        pcb_list = self.root.xpath('//geom[@name="pcb0"]/@mass')
-        if pcb_list:
-            pcb_mass = pcb_list[0]
-            mass_range["pcb"] = [
-                float(pcb_mass) * (1 - percentage),
-                float(pcb_mass) * (1 + percentage),
-            ]
-
         return mass_range
 
     def update_mass(self, mass_dict) -> None:
-        for key, mass in mass_dict.items():
-            for geom in self.root.xpath(f"//geom[starts-with(@name, {key})]"):
-                geom.set("mass", str(mass))
+        """Update mass for geoms with exact name match.
+        
+        Args:
+            mass_dict: {geom_name: mass} dictionary
+        """
+        for name, mass in mass_dict.items():
+            geoms = self.root.xpath(f'//geom[@name="{name}"]')
+            if geoms:
+                geoms[0].set("mass", str(mass))
 
     def update_damping(self, armature, damping) -> None:
         # joints = self.root.find('default').findall('joint')
@@ -306,6 +289,8 @@ class XMLCompiler:
                 obstacle.set("size", size)
 
     def update_mesh(self, mesh_dict, robot_cfg=None) -> None:
+        # This function is deprecated. 
+        raise DeprecationWarning("This function is deprecated. Please use the new mesh system.")
         # Update all the geom mesh in the model
         world_body = self.root.findall("./worldbody")[0]
         assets = self.root.findall(".//asset")[0]
