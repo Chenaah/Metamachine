@@ -35,13 +35,13 @@ from .base import Base
 # Import capybarish for ESP32 communication
 try:
     from capybarish.pubsub import NetworkServer, Rate
-    from capybarish.generated import ReceivedData, SentData
+    from capybarish.generated import MotorCommand, SensorData
     CAPYBARISH_AVAILABLE = True
 except ImportError:
     CAPYBARISH_AVAILABLE = False
     NetworkServer = None
-    ReceivedData = None
-    SentData = None
+    MotorCommand = None
+    SensorData = None
 
 # Import dashboard (optional)
 try:
@@ -77,9 +77,15 @@ class RealMetaMachine(Base):
     the NetworkServer pattern. ESP32 modules send sensor data to the server,
     and the server sends motor position commands back.
     
+    Module Types:
+        1. Active modules (module_ids): Receive motor commands
+           - action[i] is sent to module_ids[i]
+        2. Sensor modules (sensor_module_ids): No motor commands, sensor data only
+           - Useful for dedicated sensors (e.g., distance ranging module)
+    
     Module Ordering:
-        The `module_ids` config parameter defines BOTH which modules are expected
-        AND their order. For example:
+        The `module_ids` config parameter defines BOTH which active modules are 
+        expected AND their order. For example:
             module_ids: [2, 0, 1]
         means:
             - action[0] controls module 2
@@ -88,9 +94,14 @@ class RealMetaMachine(Base):
         
         This allows flexible mapping between action indices and physical modules.
     
+    Global State Sources:
+        Configure which modules provide global/main sensor data via `sources`:
+        - main_imu: Module ID for main quat/gyro (default: first module_id)
+        - goal_distance: Module ID for global goal_distance (default: null)
+    
     Network Communication:
-        - Receives: SentData (sensor feedback from ESP32 modules)
-        - Sends: ReceivedData (motor commands to ESP32 modules)
+        - Receives: SensorData (sensor feedback from ESP32 modules)
+        - Sends: MotorCommand (motor commands to ESP32 modules)
     
     Config Structure (in YAML):
         ```yaml
@@ -99,7 +110,18 @@ class RealMetaMachine(Base):
           num_envs: 1
         
         real:
-          module_ids: [0, 1, 2]     # Expected modules in action order
+          # Active modules (receive motor commands)
+          module_ids: [0, 1, 2]     # action[i] -> module_ids[i]
+          
+          # Sensor-only modules (optional)
+          sensor_module_ids: [100]  # No actions, sensor data only
+          
+          # Global state sources (optional)
+          sources:
+            main_imu: 0           # Module for main quat/gyro
+            goal_distance: 100    # Module for global goal_distance
+          
+          # Network configuration
           listen_port: 6666         # Port to receive sensor data
           command_port: 6667        # Port to send commands
           device_timeout: 2.0       # Seconds before module inactive
@@ -137,8 +159,10 @@ class RealMetaMachine(Base):
         real_cfg = cfg.get("real", {})
         
         # =====================================================================
-        # CRITICAL: Get expected module IDs from config
+        # Module Configuration
         # =====================================================================
+        
+        # Active modules (receive motor commands)
         self.expected_module_ids: List[int] = list(real_cfg.get("module_ids", []))
         if not self.expected_module_ids:
             # Fallback: generate from num_actions if not specified
@@ -152,6 +176,31 @@ class RealMetaMachine(Base):
             raise ValueError(
                 f"module_ids length ({len(self.expected_module_ids)}) must match "
                 f"num_actions ({num_actions})"
+            )
+        
+        # Sensor-only modules (no motor commands, just provide sensor data)
+        self.sensor_module_ids: List[int] = list(real_cfg.get("sensor_module_ids", []))
+        
+        # All expected modules (active + sensor)
+        self.all_expected_module_ids: Set[int] = set(self.expected_module_ids) | set(self.sensor_module_ids)
+        
+        # =====================================================================
+        # Global State Sources Configuration
+        # =====================================================================
+        sources_cfg = real_cfg.get("sources", {})
+        
+        # Main IMU module (default: first active module)
+        self.main_imu_module_id: int = sources_cfg.get("main_imu", self.expected_module_ids[0])
+        if self.main_imu_module_id not in self.all_expected_module_ids:
+            raise ValueError(
+                f"main_imu module {self.main_imu_module_id} not in module_ids or sensor_module_ids"
+            )
+        
+        # Goal distance source module (default: None = no global goal_distance)
+        self.goal_distance_module_id: Optional[int] = sources_cfg.get("goal_distance", None)
+        if self.goal_distance_module_id is not None and self.goal_distance_module_id not in self.all_expected_module_ids:
+            raise ValueError(
+                f"goal_distance module {self.goal_distance_module_id} not in module_ids or sensor_module_ids"
             )
         
         # Network configuration
@@ -179,7 +228,7 @@ class RealMetaMachine(Base):
         # Maps: IP address -> module_id
         self.ip_to_module: Dict[str, int] = {}
         # Latest data from each module
-        self.module_data: Dict[int, SentData] = {}
+        self.module_data: Dict[int, SensorData] = {}
         # Set of connected modules
         self.connected_modules: Set[int] = set()
         
@@ -223,23 +272,35 @@ class RealMetaMachine(Base):
         print("=" * 60)
         print("RealMetaMachine Initialized")
         print("=" * 60)
-        print(f"  Expected modules: {self.expected_module_ids}")
+        print(f"  Active modules: {self.expected_module_ids}")
+        print(f"  Sensor modules: {self.sensor_module_ids if self.sensor_module_ids else 'none'}")
         print(f"  Num actions: {len(self.expected_module_ids)}")
         print(f"  Listen port: {self.listen_port}")
         print(f"  Command port: {self.command_port}")
         print(f"  Kp: {self.kp_default}, Kd: {self.kd_default}")
         print(f"  Dashboard: {'enabled' if self.enable_dashboard else 'disabled'}")
+        print("-" * 60)
+        print("Global State Sources:")
+        print(f"  Main IMU (quat/gyro): module {self.main_imu_module_id}")
+        if self.goal_distance_module_id is not None:
+            print(f"  Goal distance: module {self.goal_distance_module_id}")
+        else:
+            print(f"  Goal distance: per-module only (no global source)")
         print("=" * 60)
         print("\nAction -> Module mapping:")
         for i, mod_id in enumerate(self.expected_module_ids):
             print(f"  action[{i}] -> module {mod_id}")
+        if self.sensor_module_ids:
+            print("\nSensor modules (no action):")
+            for mod_id in self.sensor_module_ids:
+                print(f"  module {mod_id} (sensor only)")
         print("\nWaiting for ESP32 modules to connect...")
 
     def _init_network_server(self) -> None:
         """Initialize the NetworkServer for ESP32 communication."""
         self.server = NetworkServer(
-            recv_type=SentData,
-            send_type=ReceivedData,
+            recv_type=SensorData,
+            send_type=MotorCommand,
             recv_port=self.listen_port,
             send_port=self.command_port,
             callback=self._on_module_feedback,
@@ -266,22 +327,22 @@ class RealMetaMachine(Base):
             self.dashboard = None
             self.enable_dashboard = False
 
-    def _on_module_feedback(self, msg: SentData, sender_ip: str) -> None:
+    def _on_module_feedback(self, msg: SensorData, sender_ip: str) -> None:
         """Callback when sensor data is received from an ESP32 module.
         
         Args:
-            msg: The SentData message containing sensor readings
+            msg: The SensorData message containing sensor readings
             sender_ip: IP address of the sender
         """
         module_id = msg.module_id
         self.fb_count += 1
         
-        # Check if this is an expected module
-        if module_id not in self.expected_module_ids:
+        # Check if this is an expected module (active or sensor)
+        if module_id not in self.all_expected_module_ids:
             # Unexpected module - log warning once
             if module_id not in self.connected_modules:
                 print(f"[Warning] Unexpected module {module_id} at {sender_ip} "
-                      f"(expected: {self.expected_module_ids})")
+                      f"(expected: {list(self.all_expected_module_ids)})")
             return
         
         # Track new module connections
@@ -290,13 +351,18 @@ class RealMetaMachine(Base):
             self.module_to_ip[module_id] = sender_ip
             self.ip_to_module[sender_ip] = module_id
             
-            # Find action index for this module
-            action_idx = self.expected_module_ids.index(module_id)
-            print(f"[Connected] Module {module_id} at {sender_ip} -> action[{action_idx}]")
+            # Determine module type and print appropriate message
+            if module_id in self.expected_module_ids:
+                action_idx = self.expected_module_ids.index(module_id)
+                print(f"[Connected] Active module {module_id} at {sender_ip} -> action[{action_idx}]")
+            else:
+                print(f"[Connected] Sensor module {module_id} at {sender_ip} (no action)")
             
             # Check if all modules are now connected
             if self.all_modules_connected():
-                print(f"[Ready] All {len(self.expected_module_ids)} modules connected!")
+                total = len(self.expected_module_ids) + len(self.sensor_module_ids)
+                print(f"[Ready] All {total} modules connected! "
+                      f"({len(self.expected_module_ids)} active, {len(self.sensor_module_ids)} sensor)")
         
         # Update IP if changed (module moved to different network)
         elif self.module_to_ip.get(module_id) != sender_ip:
@@ -314,8 +380,13 @@ class RealMetaMachine(Base):
         if self.dashboard is not None:
             self._update_dashboard_motor(module_id, msg, sender_ip)
 
-    def _update_dashboard_motor(self, module_id: int, msg: SentData, sender_ip: str) -> None:
-        """Update dashboard with motor data."""
+    def _update_dashboard_motor(self, module_id: int, msg: SensorData, sender_ip: str) -> None:
+        """Update dashboard with motor data.
+        
+        Display format:
+            - Active modules: "M{id}->A{idx}" or "M{id}->A{idx}*" (if main_imu)
+            - Sensor modules: "S{id}" or "S{id}*" (if main_imu) or "S{id}[D]" (if goal_dist source)
+        """
         if self.dashboard is None:
             return
         
@@ -329,38 +400,67 @@ class RealMetaMachine(Base):
                 if err.reset_reason0 != 0 or err.reset_reason1 != 0:
                     error_str = f"Reset: {err.reset_reason0}/{err.reset_reason1}"
         
-        # Get action index for this module
-        try:
-            action_idx = self.expected_module_ids.index(module_id)
-        except ValueError:
-            action_idx = -1
+        # Determine module type and build display name
+        is_sensor_module = module_id in self.sensor_module_ids
+        is_main_imu = module_id == self.main_imu_module_id
+        is_goal_dist_source = module_id == self.goal_distance_module_id
+        
+        # Build name with markers for special roles
+        if is_sensor_module:
+            # Sensor module format: S{id} with optional markers
+            name = f"S{module_id}"
+            if is_main_imu:
+                name += "[IMU]"
+            if is_goal_dist_source:
+                name += "[D]"
+        else:
+            # Active module format: M{id}->A{idx} with optional markers
+            try:
+                action_idx = self.expected_module_ids.index(module_id)
+            except ValueError:
+                action_idx = -1
+            name = f"M{module_id}->A{action_idx}"
+            if is_main_imu:
+                name += "*"  # Compact marker for main IMU
+            if is_goal_dist_source:
+                name += "[D]"
+        
+        # Get goal distance (show in dashboard if >= 0)
+        goal_distance = getattr(msg, 'goal_distance', -1.0)
+        
+        # Determine mode display
+        if is_sensor_module:
+            mode = "Sensor"
+        else:
+            mode = "Running" if self.motor_enabled else "Idle"
         
         self.dashboard.update_motor(
             address=sender_ip,
-            name=f"M{module_id}->A{action_idx}",
+            name=name,
             position=motor.pos if motor else 0.0,
             velocity=motor.vel if motor else 0.0,
             torque=motor.torque if motor else 0.0,
             voltage=motor.voltage if motor else 0.0,
             current=motor.current if motor else 0.0,
-            mode="Running" if self.motor_enabled else "Idle",
-            switch=self.motor_enabled,
+            mode=mode,
+            switch=self.motor_enabled if not is_sensor_module else False,
             error=error_str,
+            distance=goal_distance if goal_distance >= 0 else -1.0,
         )
 
     def all_modules_connected(self) -> bool:
-        """Check if all expected modules are connected.
+        """Check if all expected modules (active + sensor) are connected.
         
         Returns:
             bool: True if all expected modules are connected
         """
-        return all(mid in self.connected_modules for mid in self.expected_module_ids)
+        return all(mid in self.connected_modules for mid in self.all_expected_module_ids)
 
     def ready(self) -> bool:
         """Check if the robot system is ready for control.
         
-        The system is ready when all expected modules are connected
-        and actively sending data.
+        The system is ready when all expected modules (active + sensor) are 
+        connected and actively sending data.
         
         Returns:
             bool: True if all expected modules are active
@@ -371,7 +471,7 @@ class RealMetaMachine(Base):
         
         # Check all modules are in active devices (recently seen)
         active_ips = set(self.server.active_devices.keys())
-        for module_id in self.expected_module_ids:
+        for module_id in self.all_expected_module_ids:
             ip = self.module_to_ip.get(module_id)
             if ip not in active_ips:
                 return False
@@ -379,12 +479,12 @@ class RealMetaMachine(Base):
         return True
 
     def get_missing_modules(self) -> List[int]:
-        """Get list of expected modules that are not yet connected.
+        """Get list of expected modules (active + sensor) that are not yet connected.
         
         Returns:
             List of module IDs that are expected but not connected
         """
-        return [mid for mid in self.expected_module_ids if mid not in self.connected_modules]
+        return [mid for mid in self.all_expected_module_ids if mid not in self.connected_modules]
 
     def get_inactive_modules(self) -> List[int]:
         """Get list of modules that are connected but not actively sending.
@@ -394,7 +494,7 @@ class RealMetaMachine(Base):
         """
         active_ips = set(self.server.active_devices.keys())
         inactive = []
-        for module_id in self.expected_module_ids:
+        for module_id in self.all_expected_module_ids:
             if module_id in self.connected_modules:
                 ip = self.module_to_ip.get(module_id)
                 if ip not in active_ips:
@@ -439,6 +539,10 @@ class RealMetaMachine(Base):
             - dof_pos[i] corresponds to expected_module_ids[i]
             - dof_vel[i] corresponds to expected_module_ids[i]
             etc.
+            
+        Global state sources are determined by the `sources` config:
+            - main_imu: Module ID for quat/gyro (default: first module_id)
+            - goal_distance: Module ID for global goal_distance (default: None)
         """
         # Process incoming messages
         self.receive_module_data()
@@ -449,13 +553,13 @@ class RealMetaMachine(Base):
         dof_pos = np.zeros(num_actions)
         dof_vel = np.zeros(num_actions)
         
-        # Per-module data lists (in action order)
+        # Per-module data lists (in action order, for active modules only)
         imu_quats = []
         imu_gyros = []
         imu_accels = []
-        projected_gravities = []
+        goal_distances = []
         
-        # Collect data for each expected module IN ORDER
+        # Collect data for each active module IN ORDER
         for action_idx, module_id in enumerate(self.expected_module_ids):
             if module_id in self.module_data:
                 data = self.module_data[module_id]
@@ -463,6 +567,10 @@ class RealMetaMachine(Base):
                 # Motor data
                 dof_pos[action_idx] = data.motor.pos
                 dof_vel[action_idx] = data.motor.vel
+                
+                # Goal distance (per-module)
+                goal_distance = getattr(data, 'goal_distance', 0.0)
+                goal_distances.append(goal_distance)
                 
                 # IMU quaternion [x, y, z, w]
                 quat = np.array([
@@ -489,58 +597,107 @@ class RealMetaMachine(Base):
                 ])
                 imu_accels.append(accel)
                 
-                # Compute projected gravity from quaternion
-                projected_gravity = self._rotate_vector_by_quat(
-                    np.array([0, 0, -1]), quat
-                )
-                projected_gravities.append(projected_gravity)
             else:
                 # Module not yet received data - use defaults
                 imu_quats.append(np.array([0, 0, 0, 1]))
                 imu_gyros.append(np.zeros(3))
                 imu_accels.append(np.array([0, 0, -9.81]))
-                projected_gravities.append(np.array([0, 0, -1]))
+                goal_distances.append(0.0)
         
-        # Use first module's data for global values (main module)
-        main_gravity = projected_gravities[0] if projected_gravities else np.array([0, 0, -1])
-        main_gyro = imu_gyros[0] if imu_gyros else np.zeros(3)
+        # =====================================================================
+        # Get global state from configured source modules
+        # =====================================================================
+        
+        # Main IMU data (quat, gyro) from configured main_imu module
+        main_quat, main_gyro = self._get_module_imu_data(self.main_imu_module_id)
+        
+        # Global goal distance from configured module (if specified)
+        global_goal_distance = None
+        if self.goal_distance_module_id is not None:
+            global_goal_distance = self._get_module_goal_distance(self.goal_distance_module_id)
         
         self.observable_data = {
             # Joint state (ordered by action index)
             "dof_pos": dof_pos,
             "dof_vel": dof_vel,
             
-            # Global (torso) state - use main module (first in order)
-            "projected_gravity": main_gravity,
+            # Global (torso) state - from configured main_imu module
+            "quat": main_quat,
             "ang_vel_body": main_gyro,
             "vel_body": np.zeros(3),  # Not available from IMU
             
-            # Per-module data (ordered by action index)
-            "projected_gravities": projected_gravities,
+            # Per-module data (ordered by action index, active modules only)
             "gyros": imu_gyros,
             "quats": imu_quats,
             "accs": imu_accels,
+            "goal_distances": goal_distances,  # Per-module goal distances
+            
+            # Global goal distance (from configured source, if any)
+            "goal_distance": global_goal_distance,
             
             # Metadata
             "timestamp": time.time(),
             "module_order": self.expected_module_ids,
+            "sensor_modules": self.sensor_module_ids,
+            "main_imu_module": self.main_imu_module_id,
+            "goal_distance_module": self.goal_distance_module_id,
         }
         
         # Update dashboard performance
         if self.dashboard is not None:
             elapsed = time.time() - self.start_time
             self.dashboard.set_status("Cmd/Fb", f"{self.cmd_count}/{self.fb_count}")
+            total_expected = len(self.expected_module_ids) + len(self.sensor_module_ids)
             self.dashboard.set_status("Modules", 
-                f"{len(self.connected_modules)}/{len(self.expected_module_ids)}")
+                f"{len(self.connected_modules)}/{total_expected}")
             self.dashboard.update()
         
         # Log data if enabled
         if self.cfg.logging.get("log_raw_data", False):
             self._log_data()
 
-        # print(f"Observable data: {self.observable_data}")
-        
         return self.observable_data
+    
+    def _get_module_imu_data(self, module_id: int) -> tuple:
+        """Get IMU data (quat, gyro) from a specific module.
+        
+        Args:
+            module_id: The module ID to get IMU data from
+            
+        Returns:
+            tuple: (quat, gyro) arrays
+        """
+        if module_id in self.module_data:
+            data = self.module_data[module_id]
+            quat = np.array([
+                data.imu.quaternion.x,
+                data.imu.quaternion.y,
+                data.imu.quaternion.z,
+                data.imu.quaternion.w
+            ])
+            gyro = np.array([
+                data.imu.omega.x,
+                data.imu.omega.y,
+                data.imu.omega.z
+            ])
+            return quat, gyro
+        else:
+            # Module not yet received data - use defaults
+            return np.array([0, 0, 0, 1]), np.zeros(3)
+    
+    def _get_module_goal_distance(self, module_id: int) -> float:
+        """Get goal_distance from a specific module.
+        
+        Args:
+            module_id: The module ID to get goal_distance from
+            
+        Returns:
+            float: The goal_distance value (0.0 if not available)
+        """
+        if module_id in self.module_data:
+            data = self.module_data[module_id]
+            return getattr(data, 'goal_distance', 0.0)
+        return 0.0
 
     def _rotate_vector_by_quat(self, v: np.ndarray, q: np.ndarray) -> np.ndarray:
         """Rotate a vector by a quaternion."""
@@ -551,7 +708,7 @@ class RealMetaMachine(Base):
         return v + 2.0 * qw * cross1 + 2.0 * cross2
 
     def _wait_until_motor_on(self) -> None:
-        """Wait until all expected robot modules are ready."""
+        """Wait until all expected robot modules (active + sensor) are ready."""
         wait_count = 0
         rate = Rate(50.0)  # 50 Hz check rate
         
@@ -559,7 +716,7 @@ class RealMetaMachine(Base):
             # Process incoming messages
             self.receive_module_data()
             
-            # Send keepalive to connected modules
+            # Send keepalive to connected active modules
             if self.connected_modules:
                 zeros = np.zeros(len(self.expected_module_ids))
                 self._send_motor_commands(
@@ -575,7 +732,7 @@ class RealMetaMachine(Base):
                 missing = self.get_missing_modules()
                 inactive = self.get_inactive_modules()
                 connected = len(self.connected_modules)
-                total = len(self.expected_module_ids)
+                total = len(self.all_expected_module_ids)
                 
                 status = f"Waiting for modules... ({connected}/{total} connected)"
                 if missing:
@@ -665,7 +822,7 @@ class RealMetaMachine(Base):
             ip = self.module_to_ip[module_id]
             
             # Create command message
-            cmd = ReceivedData(
+            cmd = MotorCommand(
                 target=float(positions[action_idx]),
                 target_vel=float(velocities[action_idx]) if action_idx < len(velocities) else 0.0,
                 kp=float(kps[action_idx]) if action_idx < len(kps) else self.kp_default,
@@ -778,7 +935,7 @@ class RealMetaMachine(Base):
                 continue
             
             ip = self.module_to_ip[module_id]
-            cmd = ReceivedData(
+            cmd = MotorCommand(
                 target=0.0,
                 target_vel=0.0,
                 kp=self.kp_default,
@@ -800,7 +957,7 @@ class RealMetaMachine(Base):
                 continue
             
             ip = self.module_to_ip[module_id]
-            cmd = ReceivedData(
+            cmd = MotorCommand(
                 target=0.0,
                 target_vel=0.0,
                 kp=self.kp_default,
@@ -839,7 +996,11 @@ class RealMetaMachine(Base):
         print(f"  Runtime: {elapsed:.1f}s")
         print(f"  Commands sent: {self.cmd_count}")
         print(f"  Feedback received: {self.fb_count}")
-        print(f"  Modules: {list(self.connected_modules)}")
+        active_connected = [m for m in self.connected_modules if m in self.expected_module_ids]
+        sensor_connected = [m for m in self.connected_modules if m in self.sensor_module_ids]
+        print(f"  Active modules: {active_connected}")
+        if self.sensor_module_ids:
+            print(f"  Sensor modules: {sensor_connected}")
         print("=" * 60)
 
     # =========================================================================
@@ -857,12 +1018,15 @@ class RealMetaMachine(Base):
         return self.server.active_devices
 
     def get_module_status(self) -> Dict[int, Dict[str, Any]]:
-        """Get status of all modules, ordered by expected_module_ids."""
+        """Get status of all modules (active and sensor)."""
         status = {}
+        
+        # Active modules
         for module_id in self.expected_module_ids:
             if module_id in self.module_data:
                 data = self.module_data[module_id]
                 status[module_id] = {
+                    "type": "active",
                     "connected": True,
                     "action_index": self.expected_module_ids.index(module_id),
                     "ip": self.module_to_ip.get(module_id, "unknown"),
@@ -872,12 +1036,31 @@ class RealMetaMachine(Base):
                     "temperature": data.motor.temperature,
                     "voltage": data.motor.voltage,
                     "current": data.motor.current,
+                    "goal_distance": getattr(data, 'goal_distance', None),
                 }
             else:
                 status[module_id] = {
+                    "type": "active",
                     "connected": False,
                     "action_index": self.expected_module_ids.index(module_id),
                 }
+        
+        # Sensor modules
+        for module_id in self.sensor_module_ids:
+            if module_id in self.module_data:
+                data = self.module_data[module_id]
+                status[module_id] = {
+                    "type": "sensor",
+                    "connected": True,
+                    "ip": self.module_to_ip.get(module_id, "unknown"),
+                    "goal_distance": getattr(data, 'goal_distance', None),
+                }
+            else:
+                status[module_id] = {
+                    "type": "sensor",
+                    "connected": False,
+                }
+        
         return status
 
     def print_status(self) -> None:
@@ -886,17 +1069,39 @@ class RealMetaMachine(Base):
         print("Module Status")
         print("=" * 60)
         
+        # Active modules
+        print("\nActive Modules:")
         for i, module_id in enumerate(self.expected_module_ids):
             status = "✓" if module_id in self.connected_modules else "✗"
             ip = self.module_to_ip.get(module_id, "not connected")
+            is_main = " [main_imu]" if module_id == self.main_imu_module_id else ""
+            is_dist = " [goal_dist]" if module_id == self.goal_distance_module_id else ""
             
             if module_id in self.module_data:
                 data = self.module_data[module_id]
                 pos = data.motor.pos
                 vel = data.motor.vel
-                print(f"  [{status}] action[{i}] -> module {module_id} @ {ip}")
+                print(f"  [{status}] action[{i}] -> module {module_id} @ {ip}{is_main}{is_dist}")
                 print(f"        pos={pos:+.3f}, vel={vel:+.3f}")
             else:
-                print(f"  [{status}] action[{i}] -> module {module_id} @ {ip}")
+                print(f"  [{status}] action[{i}] -> module {module_id} @ {ip}{is_main}{is_dist}")
+        
+        # Sensor modules
+        if self.sensor_module_ids:
+            print("\nSensor Modules:")
+            for module_id in self.sensor_module_ids:
+                status = "✓" if module_id in self.connected_modules else "✗"
+                ip = self.module_to_ip.get(module_id, "not connected")
+                is_main = " [main_imu]" if module_id == self.main_imu_module_id else ""
+                is_dist = " [goal_dist]" if module_id == self.goal_distance_module_id else ""
+                
+                if module_id in self.module_data:
+                    data = self.module_data[module_id]
+                    goal_dist = getattr(data, 'goal_distance', None)
+                    print(f"  [{status}] module {module_id} (sensor) @ {ip}{is_main}{is_dist}")
+                    if goal_dist is not None:
+                        print(f"        goal_distance={goal_dist:.3f}")
+                else:
+                    print(f"  [{status}] module {module_id} (sensor) @ {ip}{is_main}{is_dist}")
         
         print("=" * 60)

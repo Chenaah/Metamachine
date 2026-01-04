@@ -7,7 +7,9 @@ environment with capybarish for ESP32 communication.
 
 Features:
 - Loads config with expected module_ids for ordered action mapping
-- Auto-discovers and validates ESP32 modules
+- Auto-discovers and validates ESP32 modules (both active and sensor-only)
+- Supports passive sensor modules (e.g., dedicated distance sensors)
+- Configurable global state sources (main IMU, goal distance)
 - Optional Rich dashboard for real-time monitoring
 - Keyboard controls: e=enable, d=disable, r=restart, c=calibrate, q=quit
 
@@ -28,6 +30,18 @@ Before running:
     1. Configure ESP32 modules with their module_ids (0, 1, 2, ...)
     2. Configure ESP32 to send data to this computer's IP on port 6666
     3. Ensure the module_ids in config match your physical modules
+
+Module Types:
+    - Active modules (module_ids): Receive motor commands, action[i] -> module_ids[i]
+    - Sensor modules (sensor_module_ids): No motor commands, sensor data only
+    
+    Example config for 3 active modules + 1 sensor module:
+        real:
+          module_ids: [0, 1, 2]       # 3 active modules
+          sensor_module_ids: [100]    # 1 dedicated distance sensor
+          sources:
+            main_imu: 0               # Module 0 provides main quat/gyro
+            goal_distance: 100        # Module 100 provides global goal_distance
 
 Copyright 2025 Chen Yu <chenyu@u.northwestern.edu>
 Licensed under the Apache License, Version 2.0

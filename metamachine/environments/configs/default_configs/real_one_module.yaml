@@ -28,11 +28,33 @@ morphology:
 # Real Robot Hardware Configuration
 # =============================================================================
 real:
-  # CRITICAL: Define expected module IDs and their order
-  # action[0] -> module 0
-  module_ids: [16]
+  # ---------------------------------------------------------------------------
+  # Module Configuration
+  # ---------------------------------------------------------------------------
+  # Active modules (receive motor commands)
+  # action[i] is sent to module_ids[i]
+  module_ids: [16]  # Example: module 1 is the only active module
   
-  # Network configuration
+  # Sensor-only modules (no motor commands, just provide sensor data)
+  # Useful for dedicated sensors like distance ranging modules
+  sensor_module_ids: [100]  # Example: [100] for a dedicated distance sensor
+  
+  # ---------------------------------------------------------------------------
+  # Global State Sources
+  # ---------------------------------------------------------------------------
+  # Configure which modules provide global/main sensor data.
+  # Can reference any module from module_ids OR sensor_module_ids.
+  sources:
+    # Main IMU module for global quat/gyro (default: first module in module_ids)
+    main_imu: 16
+    
+    # Goal distance source module (default: null = per-module only)
+    # Set to a module ID to use that module's goal_distance as the global value
+    goal_distance: 100
+  
+  # ---------------------------------------------------------------------------
+  # Network Configuration
+  # ---------------------------------------------------------------------------
   listen_port: 6666       # Port to receive sensor data from ESP32
   command_port: 6667      # Port to send commands to ESP32
   device_timeout: 2.0     # Seconds before module considered inactive

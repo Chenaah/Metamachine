@@ -52,12 +52,17 @@ class RawState:
     contact_floor_geoms: list[int] = field(default_factory=list)
     contact_floor_socks: list[int] = field(default_factory=list)
 
+    # Goal distance (from distance sensor)
+    goal_distance: float = -1.0  # Global goal distance (-1 = no reading)
+    goal_distances: np.ndarray = field(default_factory=lambda: np.zeros(1))  # Per-module
+
     def __init__(self, num_dof: int = 1) -> None:
         """Initialize RawState with specified number of degrees of freedom."""
         # Position and orientation
         self.pos_world = np.zeros(3)
         self.quat = np.zeros(4)
         self.quats = []
+        self.goal_distance = -1.0
 
         # Velocities
         self.vel_body = np.zeros(3)
@@ -65,13 +70,12 @@ class RawState:
         self.ang_vel_body = np.zeros(3)
         self.ang_vel_world = np.zeros(3)
 
-        # Joint state with correct size
+        # Per-module state
         self.dof_pos = np.zeros(num_dof)
         self.dof_vel = np.zeros(num_dof)
-
-        # Sensor data
         self.gyros = np.zeros((num_dof, 3))
         self.accs = np.zeros((num_dof, 3))
+        self.goal_distances = np.ones(num_dof)*-1.0
 
         # Contact information
         self.contact_floor_balls = []
@@ -526,6 +530,9 @@ class State:
         "contact_floor_balls": lambda s: getattr(s, "contact_floor_balls", []),
         "num_jointfloor_contact": lambda s: getattr(s, "num_jointfloor_contact", 0),
         "com_vel_world": lambda s: getattr(s, "com_vel_world", np.zeros(3)),
+        # Goal distance (from distance sensor)
+        "goal_distance": lambda s: np.array([s.raw.goal_distance]),
+        "goal_distances": lambda s: s.raw.goal_distances,
     }
 
     # Define available modular observation components (for per-module observations)
@@ -544,6 +551,8 @@ class State:
         "masked_dof_vel": lambda s: s.masked_dof_vel,
         "last_action": lambda s: s.action_history.last_action,
         "last_last_action": lambda s: s.action_history.last_last_action,
+        # Goal distance (from distance sensor) - per module
+        "goal_distances": lambda s: s.raw.goal_distances,
     }
 
     # Define common transformations
@@ -1831,7 +1840,7 @@ class State:
             Dictionary containing sensor readings like gyros, accs, etc.
         """
         sensor_data = {}
-        sensor_keys = ["gyros", "accs", "quats"]
+        sensor_keys = ["gyros", "accs", "quats", "goal_distance", "goal_distances"]
 
         for key in sensor_keys:
             if hasattr(self, key):
@@ -1860,6 +1869,8 @@ class State:
             "dof_vel",
             "gyros",
             "accs",
+            "goal_distance",
+            "goal_distances",
         ]:
             if hasattr(self.raw, attr):
                 all_data[f"raw_{attr}"] = getattr(self.raw, attr)
