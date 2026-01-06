@@ -62,8 +62,15 @@ real:
   # Control features
   enable_filter: true     # Enable ESP32-side low-pass filter
   
-  # Dashboard (optional Rich terminal UI)
+  # ---------------------------------------------------------------------------
+  # Dashboard Configuration
+  # ---------------------------------------------------------------------------
+  # Enhanced Rich terminal dashboard for real-time debugging
   enable_dashboard: true
+  dashboard_type: rl        # "rl" for enhanced multi-panel, "motor" for simple
+  dashboard_theme: cyber    # cyber, matrix, minimal, retro
+  dashboard_fullscreen: true    # false = compact mode, allows print() below dashboard
+  dashboard_capture_prints: true  # auto-capture print() to dashboard log panel
   
   # Optional: Custom module names for dashboard display
   # module_names:
@@ -99,22 +106,13 @@ control:
 observation:
   torso_node_id: 0
   
-  # Modular observation mode (recommended for real robots)
-  modular:
-    enabled: true
-    num_modules: 3
-    main_module_index: 0    # Use module 0 for global observations
-    
-    per_module_components:
-      - name: projected_gravities
-        index_type: element
-      - name: gyros
-        index_type: element
-    
-    global_components:
-      - name: dof_pos
-      - name: dof_vel
-      - name: last_action
+  components:
+    - name: projected_gravity
+    - name: ang_vel_body
+    - name: dof_pos
+      transform: cos
+    - name: dof_vel
+    - name: last_action
 
   clip_observations: 100.0
   include_history_steps: 3

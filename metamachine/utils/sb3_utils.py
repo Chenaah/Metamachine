@@ -614,6 +614,7 @@ def load_from_checkpoint(
     render_mode: str = "viewer",
     real_robot: bool = False,
     device: str = "auto",
+    cfg_real: Optional[Union[str, dict]] = None,
 ) -> tuple:
     """Load environment and model from a training checkpoint directory.
     
@@ -633,6 +634,12 @@ def load_from_checkpoint(
         render_mode: Render mode for simulation ("viewer", "mp4", "none")
         real_robot: If True, create RealMetaMachine instead of MetaMachine
         device: Device for model loading ("auto", "cuda", "cpu")
+        cfg_real: Optional configuration for real robot deployment. Can be:
+            - None: Use cfg.real from training config
+            - str: Path to a YAML file containing real robot config (merged into cfg.real)
+            - dict: Dictionary of real robot config (merged into cfg.real)
+            This allows deploying the trained policy on different real hardware
+            by overriding network ports, module IDs, etc. from training.
     
     Returns:
         tuple: (env, model, cfg) - environment, loaded model (or None), config
@@ -648,15 +655,36 @@ def load_from_checkpoint(
             render_mode="viewer"
         )
         
-        # Load for real robot deployment
+        # Load for real robot deployment with default config
         env, model, cfg = load_from_checkpoint(
             "./logs/my_experiment",
             checkpoint="final",
             real_robot=True
         )
+        
+        # Load for real robot with custom hardware config
+        env, model, cfg = load_from_checkpoint(
+            "./logs/my_experiment",
+            checkpoint="final",
+            real_robot=True,
+            cfg_real="configs/my_robot_hardware.yaml"
+        )
+        
+        # Load for real robot with inline overrides
+        env, model, cfg = load_from_checkpoint(
+            "./logs/my_experiment",
+            real_robot=True,
+            cfg_real={
+                "module_ids": [16, 17],
+                "listen_port": 7777,
+                "command_port": 7778
+            }
+        )
     """
     from pathlib import Path
     import glob
+    import yaml
+    from omegaconf import OmegaConf
     
     log_path = Path(log_dir)
     
@@ -673,6 +701,39 @@ def load_from_checkpoint(
     # Load configuration
     from metamachine.environments.configs.config_registry import ConfigRegistry
     cfg = ConfigRegistry.create_from_file(str(config_path))
+    
+    # Handle cfg_real override for real robot deployment
+    if real_robot and cfg_real is not None:
+        # Load cfg_real from file or dict
+        if isinstance(cfg_real, str):
+            # It's a file path
+            cfg_real_path = Path(cfg_real)
+            if not cfg_real_path.is_absolute():
+                # Try relative to log directory first
+                if (log_path / cfg_real).exists():
+                    cfg_real_path = log_path / cfg_real
+            if not cfg_real_path.exists():
+                raise FileNotFoundError(f"cfg_real file not found: {cfg_real}")
+            with open(cfg_real_path) as f:
+                cfg_real_dict = yaml.safe_load(f)
+            print(f"[Checkpoint] Loaded cfg_real from: {cfg_real_path}")
+        elif isinstance(cfg_real, dict):
+            cfg_real_dict = cfg_real
+            print(f"[Checkpoint] Using cfg_real from dict override")
+        else:
+            raise TypeError(f"cfg_real must be str (path) or dict, got {type(cfg_real)}")
+        
+        # Merge cfg_real_dict into cfg.real
+        if cfg_real_dict:
+            cfg_real_oc = OmegaConf.create(cfg_real_dict)
+            if "real" not in cfg or cfg.real is None:
+                # Create cfg.real if it doesn't exist
+                cfg.real = cfg_real_oc
+                print(f"[Checkpoint] Created cfg.real from cfg_real overrides")
+            else:
+                # Merge into existing cfg.real
+                cfg.real = OmegaConf.merge(cfg.real, cfg_real_oc)
+                print(f"[Checkpoint] Merged cfg_real overrides into config")
     
     # Override render mode for simulation
     if not real_robot:

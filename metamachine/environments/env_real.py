@@ -45,12 +45,23 @@ except ImportError:
 
 # Import dashboard (optional)
 try:
-    from capybarish.dashboard import MotorDashboard, DashboardConfig
+    from capybarish.dashboard import MotorDashboard, DashboardConfig, RLDashboard, RLDashboardConfig
     DASHBOARD_AVAILABLE = True
+    RL_DASHBOARD_AVAILABLE = True
 except ImportError:
-    DASHBOARD_AVAILABLE = False
-    MotorDashboard = None
-    DashboardConfig = None
+    try:
+        from capybarish.dashboard import MotorDashboard, DashboardConfig
+        DASHBOARD_AVAILABLE = True
+        RL_DASHBOARD_AVAILABLE = False
+        RLDashboard = None
+        RLDashboardConfig = None
+    except ImportError:
+        DASHBOARD_AVAILABLE = False
+        RL_DASHBOARD_AVAILABLE = False
+        MotorDashboard = None
+        DashboardConfig = None
+        RLDashboard = None
+        RLDashboardConfig = None
 
 
 def sanitize_dict(d: dict) -> dict:
@@ -214,8 +225,12 @@ class RealMetaMachine(Base):
         self.enable_filter = real_cfg.get("enable_filter", True)
         
         # Dashboard configuration
-        self.enable_dashboard = real_cfg.get("enable_dashboard", False)
-        self.dashboard: Optional[MotorDashboard] = None
+        self.enable_dashboard = real_cfg.get("enable_dashboard", True)
+        self.dashboard_type = real_cfg.get("dashboard_type", "rl")  # "rl", "motor", "basic"
+        self.dashboard_theme = real_cfg.get("dashboard_theme", "cyber")  # cyber, matrix, minimal, retro
+        self.dashboard_fullscreen = real_cfg.get("dashboard_fullscreen", True)  # False = compact mode
+        self.dashboard_capture_prints = real_cfg.get("dashboard_capture_prints", True)  # Capture print() to log
+        self.dashboard = None  # Can be RLDashboard or MotorDashboard
         
         # Initialize the network server
         self._init_network_server()
@@ -308,22 +323,63 @@ class RealMetaMachine(Base):
         )
 
     def _init_dashboard(self) -> None:
-        """Initialize the Rich dashboard for real-time monitoring."""
+        """Initialize the Rich dashboard for real-time monitoring.
+        
+        Supports two dashboard types:
+        - "rl": Enhanced RLDashboard with observation/action visualization
+        - "motor": Simple MotorDashboard with motor status only
+        """
         if not DASHBOARD_AVAILABLE:
             print("[Warning] Dashboard not available. Install rich: pip install rich")
             self.enable_dashboard = False
             return
         
         try:
-            config = DashboardConfig(
-                title="RealMetaMachine Controller",
-                refresh_rate=20,
-                timeout_sec=self.device_timeout,
-            )
-            self.dashboard = MotorDashboard(config)
-            self.dashboard.start()
+            # Try RLDashboard first (enhanced multi-panel layout)
+            if self.dashboard_type == "rl" and RL_DASHBOARD_AVAILABLE:
+                config = RLDashboardConfig(
+                    title="🤖 RealMetaMachine",
+                    refresh_rate=20,
+                    timeout_sec=self.device_timeout,
+                    theme=self.dashboard_theme,
+                    show_observations=True,
+                    show_actions=True,
+                    show_rewards=True,
+                    history_steps=self.cfg.observation.get("include_history_steps", 3),
+                    fullscreen=self.dashboard_fullscreen,
+                    capture_prints=self.dashboard_capture_prints,
+                )
+                self.dashboard = RLDashboard(config)
+                
+                # Set expected modules for tracking
+                self.dashboard.set_expected_modules(
+                    self.expected_module_ids, 
+                    self.sensor_module_ids
+                )
+                
+                # Log startup info
+                self.dashboard.log_info(f"Listening on port {self.listen_port}")
+                self.dashboard.log_info(f"Expecting {len(self.expected_module_ids)} active modules")
+                if self.sensor_module_ids:
+                    self.dashboard.log_info(f"Expecting {len(self.sensor_module_ids)} sensor modules")
+                if not self.dashboard_fullscreen:
+                    self.dashboard.log_info("Compact mode - prints visible below")
+                
+                self.dashboard.start()
+            else:
+                # Fallback to MotorDashboard
+                config = DashboardConfig(
+                    title="RealMetaMachine Controller",
+                    refresh_rate=20,
+                    timeout_sec=self.device_timeout,
+                )
+                self.dashboard = MotorDashboard(config)
+                self.dashboard.start()
+                print("[Dashboard] MotorDashboard started")
         except Exception as e:
             print(f"[Warning] Failed to start dashboard: {e}")
+            import traceback
+            traceback.print_exc()
             self.dashboard = None
             self.enable_dashboard = False
 
@@ -341,8 +397,7 @@ class RealMetaMachine(Base):
         if module_id not in self.all_expected_module_ids:
             # Unexpected module - log warning once
             if module_id not in self.connected_modules:
-                print(f"[Warning] Unexpected module {module_id} at {sender_ip} "
-                      f"(expected: {list(self.all_expected_module_ids)})")
+                self._dashboard_log(f"Unexpected module {module_id} @ {sender_ip}", "warn")
             return
         
         # Track new module connections
@@ -351,18 +406,17 @@ class RealMetaMachine(Base):
             self.module_to_ip[module_id] = sender_ip
             self.ip_to_module[sender_ip] = module_id
             
-            # Determine module type and print appropriate message
-            if module_id in self.expected_module_ids:
-                action_idx = self.expected_module_ids.index(module_id)
-                print(f"[Connected] Active module {module_id} at {sender_ip} -> action[{action_idx}]")
-            else:
-                print(f"[Connected] Sensor module {module_id} at {sender_ip} (no action)")
+            # Determine module type
+            is_sensor = module_id in self.sensor_module_ids
+            
+            # Notify dashboard about module connection
+            if self.dashboard is not None and hasattr(self.dashboard, 'module_connected'):
+                self.dashboard.module_connected(module_id, sender_ip, is_sensor)
             
             # Check if all modules are now connected
             if self.all_modules_connected():
                 total = len(self.expected_module_ids) + len(self.sensor_module_ids)
-                print(f"[Ready] All {total} modules connected! "
-                      f"({len(self.expected_module_ids)} active, {len(self.sensor_module_ids)} sensor)")
+                self._dashboard_log(f"All {total} modules ready!", "success")
         
         # Update IP if changed (module moved to different network)
         elif self.module_to_ip.get(module_id) != sender_ip:
@@ -371,7 +425,7 @@ class RealMetaMachine(Base):
             if old_ip:
                 self.ip_to_module.pop(old_ip, None)
             self.ip_to_module[sender_ip] = module_id
-            print(f"[Update] Module {module_id} IP changed: {old_ip} -> {sender_ip}")
+            self._dashboard_log(f"Module {module_id} IP: {old_ip} → {sender_ip}", "warn")
         
         # Store latest data
         self.module_data[module_id] = msg
@@ -419,9 +473,9 @@ class RealMetaMachine(Base):
                 action_idx = self.expected_module_ids.index(module_id)
             except ValueError:
                 action_idx = -1
-            name = f"M{module_id}->A{action_idx}"
+            name = f"M{module_id}→A{action_idx}"
             if is_main_imu:
-                name += "*"  # Compact marker for main IMU
+                name += "★"  # Marker for main IMU
             if is_goal_dist_source:
                 name += "[D]"
         
@@ -643,14 +697,11 @@ class RealMetaMachine(Base):
             "goal_distance_module": self.goal_distance_module_id,
         }
         
-        # Update dashboard performance
+        # Update dashboard performance and RL state
         if self.dashboard is not None:
-            elapsed = time.time() - self.start_time
-            self.dashboard.set_status("Cmd/Fb", f"{self.cmd_count}/{self.fb_count}")
-            total_expected = len(self.expected_module_ids) + len(self.sensor_module_ids)
-            self.dashboard.set_status("Modules", 
-                f"{len(self.connected_modules)}/{total_expected}")
-            self.dashboard.update()
+            self._update_dashboard_performance()
+            # Update observation components for RLDashboard
+            self._update_dashboard_observations_from_state()
         
         # Log data if enabled
         if self.cfg.logging.get("log_raw_data", False):
@@ -706,6 +757,197 @@ class RealMetaMachine(Base):
         cross1 = np.cross(q_vec, v)
         cross2 = np.cross(q_vec, cross1)
         return v + 2.0 * qw * cross1 + 2.0 * cross2
+
+    # =========================================================================
+    # Dashboard Update Methods
+    # =========================================================================
+    
+    def _update_dashboard_performance(self) -> None:
+        """Update dashboard with performance metrics and status."""
+        if self.dashboard is None:
+            return
+        
+        # Common status updates for both dashboard types
+        total_expected = len(self.expected_module_ids) + len(self.sensor_module_ids)
+        
+        # Check if using RLDashboard (has update_performance method)
+        if hasattr(self.dashboard, 'update_performance'):
+            # RLDashboard - update performance metrics
+            self.dashboard.update_performance(
+                loop_dt=self.send_dt,
+                compute_time=self.compute_time,
+                cmd_count=self.cmd_count,
+                fb_count=self.fb_count
+            )
+            self.dashboard.set_status("Modules", f"{len(self.connected_modules)}/{total_expected}")
+        else:
+            # MotorDashboard - use set_status
+            self.dashboard.set_status("Cmd/Fb", f"{self.cmd_count}/{self.fb_count}")
+            self.dashboard.set_status("Modules", f"{len(self.connected_modules)}/{total_expected}")
+        
+        self.dashboard.update()
+    
+    def _update_dashboard_observation(self, obs_components: Dict[str, Any]) -> None:
+        """Update dashboard with observation component data.
+        
+        Args:
+            obs_components: Dict mapping component names to values
+        """
+        if self.dashboard is None:
+            return
+        
+        # Only RLDashboard supports observation updates
+        if hasattr(self.dashboard, 'update_observation'):
+            self.dashboard.update_observation(obs_components)
+    
+    def _update_dashboard_action(self, action: np.ndarray) -> None:
+        """Update dashboard with current action.
+        
+        Args:
+            action: Action array being sent to motors
+        """
+        if self.dashboard is None:
+            return
+        
+        # Only RLDashboard supports action updates
+        if hasattr(self.dashboard, 'update_action'):
+            self.dashboard.update_action(action)
+    
+    def _update_dashboard_reward(self, reward: float, episode_reward: float = None) -> None:
+        """Update dashboard with reward data.
+        
+        Args:
+            reward: Step reward
+            episode_reward: Total episode reward (optional)
+        """
+        if self.dashboard is None:
+            return
+        
+        if hasattr(self.dashboard, 'update_reward'):
+            self.dashboard.update_reward(reward, episode_reward)
+    
+    def _update_dashboard_step(self) -> None:
+        """Increment dashboard step counter."""
+        if self.dashboard is None:
+            return
+        
+        if hasattr(self.dashboard, 'increment_step'):
+            self.dashboard.increment_step()
+    
+    def _update_dashboard_new_episode(self) -> None:
+        """Signal new episode to dashboard."""
+        if self.dashboard is None:
+            return
+        
+        if hasattr(self.dashboard, 'new_episode'):
+            self.dashboard.new_episode()
+    
+    def _dashboard_log(self, message: str, level: str = "info") -> None:
+        """Log a message to the dashboard (if RLDashboard).
+        
+        Args:
+            message: Message to log
+            level: "info", "warn", "error", "success"
+        """
+        if self.dashboard is None:
+            return
+        
+        if hasattr(self.dashboard, 'log'):
+            self.dashboard.log(message, level)
+    
+    def _update_dashboard_observations_from_state(self) -> None:
+        """Extract and update observation components from the state manager.
+        
+        This method reads the current observation components from self.state
+        and sends them to the RLDashboard for visualization.
+        
+        Components are split into:
+        - Used components (●): Actually used in policy observation
+        - Debug components (○): Raw data for debugging
+        """
+        if self.dashboard is None or not hasattr(self.dashboard, 'update_observation'):
+            return
+        
+        if not hasattr(self, 'state'):
+            return
+        
+        used_components = {}
+        debug_components = {}
+        
+        try:
+            # Get observation components actually used in policy
+            if hasattr(self.state, 'observation_components') and self.state.observation_components:
+                for component in self.state.observation_components:
+                    try:
+                        data = component.get_data(self.state)
+                        if data is not None:
+                            used_components[component.name] = np.asarray(data).flatten()
+                    except Exception:
+                        pass  # Skip components that fail
+            
+            # Also include raw observable data for debugging
+            if self.observable_data:
+                # Add key raw values (these are debug data)
+                for key in ['dof_pos', 'dof_vel', 'ang_vel_body']:
+                    if key in self.observable_data:
+                        val = self.observable_data[key]
+                        if val is not None and key not in used_components:
+                            debug_components[f"raw_{key}"] = np.asarray(val).flatten()
+                
+                # Add main quat as roll/pitch/yaw for easier visualization
+                if 'quat' in self.observable_data:
+                    quat = self.observable_data['quat']
+                    if quat is not None:
+                        rpy = self._quat_to_rpy(quat)
+                        debug_components['rpy_deg'] = np.degrees(rpy)
+                
+                # Add goal distance if available
+                if self.observable_data.get('goal_distance') is not None:
+                    debug_components['goal_dist'] = np.array([self.observable_data['goal_distance']])
+            
+            # Add derived state for debugging
+            if hasattr(self.state, 'derived'):
+                if hasattr(self.state.derived, 'projected_gravity'):
+                    pg = self.state.derived.projected_gravity
+                    if pg is not None and 'projected_gravity' not in used_components:
+                        debug_components['proj_gravity'] = np.asarray(pg).flatten()
+                if hasattr(self.state.derived, 'speed'):
+                    speed = self.state.derived.speed
+                    if speed is not None:
+                        debug_components['speed'] = np.asarray(speed).flatten()
+            
+            # Update dashboard - mark used components appropriately
+            if used_components:
+                self.dashboard.update_observation(used_components, used_in_policy=True)
+            if debug_components:
+                self.dashboard.update_observation(debug_components, used_in_policy=False)
+                
+        except Exception as e:
+            # Don't crash on dashboard update failures
+            pass
+    
+    def _quat_to_rpy(self, quat: np.ndarray) -> np.ndarray:
+        """Convert quaternion [x,y,z,w] to roll-pitch-yaw."""
+        x, y, z, w = quat
+        
+        # Roll (x-axis rotation)
+        sinr_cosp = 2 * (w * x + y * z)
+        cosr_cosp = 1 - 2 * (x * x + y * y)
+        roll = np.arctan2(sinr_cosp, cosr_cosp)
+        
+        # Pitch (y-axis rotation)
+        sinp = 2 * (w * y - z * x)
+        if abs(sinp) >= 1:
+            pitch = np.copysign(np.pi / 2, sinp)
+        else:
+            pitch = np.arcsin(sinp)
+        
+        # Yaw (z-axis rotation)
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        yaw = np.arctan2(siny_cosp, cosy_cosp)
+        
+        return np.array([roll, pitch, yaw])
 
     def _wait_until_motor_on(self) -> None:
         """Wait until all expected robot modules (active + sensor) are ready."""
@@ -771,6 +1013,9 @@ class RealMetaMachine(Base):
         if vel is None:
             vel = np.zeros_like(pos)
         
+        # Update dashboard with action (before sending)
+        self._update_dashboard_action(pos)
+        
         # Send commands to all modules
         sent = self._send_motor_commands(
             positions=pos,
@@ -791,6 +1036,9 @@ class RealMetaMachine(Base):
         
         self.send_dt = time.time() - self.t0
         self.t0 = time.time()
+        
+        # Update dashboard step counter
+        self._update_dashboard_step()
         
         return {
             "compute_time": self.compute_time,
@@ -860,6 +1108,9 @@ class RealMetaMachine(Base):
             kds=self.kds,
             enable=self.motor_enabled
         )
+        
+        # Signal new episode to dashboard
+        self._update_dashboard_new_episode()
         
         time.sleep(0.5)
 
@@ -969,6 +1220,21 @@ class RealMetaMachine(Base):
                 timestamp=current_time,
             )
             self.server.send_to(ip, cmd)
+
+    def step(self, action: np.ndarray):
+        """Execute one environment step with dashboard updates.
+        
+        Extends the base step() to add reward tracking for the dashboard.
+        """
+        # Call parent step
+        obs, reward, done, truncated, info = super().step(action)
+        
+        # Update dashboard with reward info
+        if self.dashboard is not None:
+            episode_reward = sum(self.episode_rewards) if hasattr(self, 'episode_rewards') else reward
+            self._update_dashboard_reward(reward, episode_reward)
+        
+        return obs, reward, done, truncated, info
 
     def close(self) -> None:
         """Clean up resources."""

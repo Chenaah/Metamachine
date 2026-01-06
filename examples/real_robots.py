@@ -71,6 +71,16 @@ DEFAULT_CONFIG = str(
 
 def signal_handler(signum, frame):
     """Handle Ctrl+C gracefully."""
+    # Restore terminal cursor immediately
+    sys.stdout.write('\033[?25h')  # Show cursor
+    sys.stdout.write('\033[0m')    # Reset attributes
+    sys.stdout.flush()
+    try:
+        with open('/dev/tty', 'w') as tty:
+            tty.write('\033[?25h\033[0m')
+            tty.flush()
+    except Exception:
+        pass
     print("\n[Signal] Received interrupt. Shutting down...")
     sys.exit(0)
 
@@ -93,6 +103,12 @@ Examples:
     
     # Run with trained policy
     python real_robots.py --policy logs/experiment/policy.pt
+    
+    # Load from training log with custom module IDs
+    python real_robots.py --log-dir logs/20251228_223556l_lego_tripod --module-ids 5 21 16
+    
+    # Load from training log with sensor modules
+    python real_robots.py --log-dir logs/experiment --module-ids 5 21 16 --sensor-module-ids 100
     
 Keyboard Controls (during operation):
     e - Enable motors
@@ -152,6 +168,22 @@ Keyboard Controls (during operation):
     )
     
     parser.add_argument(
+        "--module-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Module IDs for real robot (e.g., --module-ids 5 21 16). Overrides config."
+    )
+    
+    parser.add_argument(
+        "--sensor-module-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Sensor-only module IDs (e.g., --sensor-module-ids 100). Overrides config."
+    )
+    
+    parser.add_argument(
         "--no-dashboard",
         action="store_true",
         help="Disable Rich dashboard"
@@ -168,14 +200,14 @@ Keyboard Controls (during operation):
 
 
 def load_config(config_path: str):
-    """Load configuration from YAML file."""
+    """Load configuration from YAML file or config name."""
     from metamachine.environments.configs.config_registry import ConfigRegistry
     
-    if not os.path.exists(config_path):
-        print(f"Error: Config file not found: {config_path}")
-        sys.exit(1)
+    if os.path.exists(config_path):
+        cfg = ConfigRegistry.create_from_file(config_path)
+    else:
+        cfg = ConfigRegistry.create_from_name(config_path)
     
-    cfg = ConfigRegistry.create_from_file(config_path)
     return cfg
 
 
@@ -492,13 +524,23 @@ def main():
         try:
             from metamachine.utils.sb3_utils import load_from_checkpoint
             
+            # Build cfg_real overrides from CLI arguments
+            cfg_real_overrides = {}
+            if args.module_ids is not None:
+                cfg_real_overrides["module_ids"] = args.module_ids
+            if args.sensor_module_ids is not None:
+                cfg_real_overrides["sensor_module_ids"] = args.sensor_module_ids
+            if args.no_dashboard:
+                cfg_real_overrides["enable_dashboard"] = False
+            
             env, model, cfg = load_from_checkpoint(
                 args.log_dir,
                 checkpoint=args.checkpoint,
                 real_robot=True,
+                cfg_real=cfg_real_overrides if cfg_real_overrides else None
             )
             
-            # Override dashboard setting if requested
+            # Override dashboard setting if requested (redundant but safe)
             if args.no_dashboard:
                 if hasattr(cfg, 'real') and cfg.real:
                     cfg.real.enable_dashboard = False
