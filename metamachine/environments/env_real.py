@@ -253,6 +253,11 @@ class RealMetaMachine(Base):
         self.compute_time = 0.0
         self.send_dt = 0.0
         
+        # Command keyboard control state
+        self._selected_command_idx = 0  # Currently selected command for adjustment
+        self._command_step_size = 0.1   # Step size for continuous command adjustment
+        self._keyboard_command_mode = False  # True = keyboard controls commands, False = auto resample
+        
         # Per-motor gains
         self.kps = np.ones(num_actions) * self.kp_default
         self.kds = np.ones(num_actions) * self.kd_default
@@ -309,6 +314,12 @@ class RealMetaMachine(Base):
             print("\nSensor modules (no action):")
             for mod_id in self.sensor_module_ids:
                 print(f"  module {mod_id} (sensor only)")
+        print("\n" + "-" * 60)
+        print("Keyboard Controls:")
+        print("  Motor:    e=enable, d=disable, r=restart, c=calibrate")
+        print("  Commands: 0-9=select/set, []=prev/next, +/-=adjust")
+        print("            R=resample, k=toggle keyboard mode, i=info")
+        print("-" * 60)
         print("\nWaiting for ESP32 modules to connect...")
 
     def _init_network_server(self) -> None:
@@ -780,6 +791,9 @@ class RealMetaMachine(Base):
                 fb_count=self.fb_count
             )
             self.dashboard.set_status("Modules", f"{len(self.connected_modules)}/{total_expected}")
+            
+            # Also update command panel on every step
+            self._update_dashboard_commands()
         else:
             # MotorDashboard - use set_status
             self.dashboard.set_status("Cmd/Fb", f"{self.cmd_count}/{self.fb_count}")
@@ -862,7 +876,8 @@ class RealMetaMachine(Base):
         and sends them to the RLDashboard for visualization.
         
         Components are split into:
-        - Used components (●): Actually used in policy observation
+        - Command components (🎯): Command values fed to policy
+        - Used components (●): Other observation components used in policy
         - Debug components (○): Raw data for debugging
         """
         if self.dashboard is None or not hasattr(self.dashboard, 'update_observation'):
@@ -873,17 +888,30 @@ class RealMetaMachine(Base):
         
         used_components = {}
         debug_components = {}
+        command_obs_components = {}
         
         try:
+            # Always include current commands from command_manager (these are fed to policy)
+            if hasattr(self, 'command_manager') and self.command_manager.commands is not None:
+                cmd_array = np.asarray(self.command_manager.commands).flatten()
+                # Use consistent key name to avoid duplicates
+                command_obs_components["commands"] = cmd_array
+            
             # Get observation components actually used in policy
             if hasattr(self.state, 'observation_components') and self.state.observation_components:
                 for component in self.state.observation_components:
                     try:
                         data = component.get_data(self.state)
                         if data is not None:
-                            used_components[component.name] = np.asarray(data).flatten()
-                    except Exception:
-                        pass  # Skip components that fail
+                            arr = np.asarray(data).flatten()
+                            # Check if this is the commands component (already added above)
+                            if 'command' in component.name.lower():
+                                # Skip - already added from command_manager
+                                continue
+                            used_components[component.name] = arr
+                    except Exception as e:
+                        # Log component failures to dashboard
+                        self._dashboard_log(f"Obs '{component.name}' failed: {e}", "warn")
             
             # Also include raw observable data for debugging
             if self.observable_data:
@@ -916,15 +944,17 @@ class RealMetaMachine(Base):
                     if speed is not None:
                         debug_components['speed'] = np.asarray(speed).flatten()
             
-            # Update dashboard - mark used components appropriately
+            # Update dashboard - commands first, then used, then debug
+            if command_obs_components:
+                self.dashboard.update_observation(command_obs_components, used_in_policy=True, is_command=True)
             if used_components:
-                self.dashboard.update_observation(used_components, used_in_policy=True)
+                self.dashboard.update_observation(used_components, used_in_policy=True, is_command=False)
             if debug_components:
-                self.dashboard.update_observation(debug_components, used_in_policy=False)
+                self.dashboard.update_observation(debug_components, used_in_policy=False, is_command=False)
                 
         except Exception as e:
-            # Don't crash on dashboard update failures
-            pass
+            # Log error to dashboard instead of silently failing
+            self._dashboard_log(f"Obs update error: {e}", "error")
     
     def _quat_to_rpy(self, quat: np.ndarray) -> np.ndarray:
         """Convert quaternion [x,y,z,w] to roll-pitch-yaw."""
@@ -1123,10 +1153,28 @@ class RealMetaMachine(Base):
         self._check_input()
 
     def _check_input(self) -> None:
-        """Handle keyboard input for real robot control."""
+        """Handle keyboard input for real robot control.
+        
+        Motor Controls:
+            e: Enable motors
+            d: Disable motors
+            r: Restart motors
+            c: Calibrate motors
+        
+        Command Controls:
+            0-9: Set one-hot command (if onehot_mode) or select command index
+            [/]: Select previous/next command (for continuous adjustment)
+            +/-: Increase/decrease selected command value
+            R (shift+r): Resample all commands
+            k: Toggle keyboard command mode (disables auto-resample)
+            
+        Info:
+            i: Print current command info
+        """
         if hasattr(self, 'kb') and self.kb.kbhit():
             self.input_key = self.kb.getch()
             
+            # Motor controls
             if self.input_key == "e":
                 self._enable_motor()
             elif self.input_key == "d":
@@ -1135,6 +1183,34 @@ class RealMetaMachine(Base):
                 self._restart_motor()
             elif self.input_key == "c":
                 self._calibrate_motor()
+            
+            # Command controls - number keys 0-9
+            elif self.input_key in "0123456789":
+                self._handle_number_key(int(self.input_key))
+            
+            # Command selection with [ and ]
+            elif self.input_key == "[":
+                self._select_prev_command()
+            elif self.input_key == "]":
+                self._select_next_command()
+            
+            # Command value adjustment with +/- (= is + without shift)
+            elif self.input_key in "+=":
+                self._adjust_command(+self._command_step_size)
+            elif self.input_key == "-":
+                self._adjust_command(-self._command_step_size)
+            
+            # Resample commands with R (uppercase)
+            elif self.input_key == "R":
+                self._resample_commands_keyboard()
+            
+            # Toggle keyboard command mode
+            elif self.input_key == "k":
+                self._toggle_keyboard_command_mode()
+            
+            # Print command info
+            elif self.input_key == "i":
+                self._print_command_info()
             
             if time.time() - self.last_motor_com_time > 0.5:
                 self._reset_motor_commands()
@@ -1176,6 +1252,215 @@ class RealMetaMachine(Base):
             kds=zeros,
             enable=False
         )
+
+    # =========================================================================
+    # Command Keyboard Control Methods
+    # =========================================================================
+    
+    def _handle_number_key(self, num: int) -> None:
+        """Handle number key press for command control.
+        
+        In one-hot mode: Sets that index as the active command (1.0, others 0.0)
+        In continuous mode: Selects that command index for adjustment
+        
+        Args:
+            num: Number key pressed (0-9)
+        """
+        if not hasattr(self, 'command_manager'):
+            return
+        
+        cm = self.command_manager
+        
+        if cm.onehot_mode:
+            # One-hot mode: activate this index
+            if num < cm.num_commands:
+                cm.set_onehot_by_index(num)
+                self._enable_keyboard_command_mode()
+                msg = f"Command: one-hot[{num}] = {cm.command_names[num]}"
+                self._dashboard_log(msg, "info")
+                self._update_dashboard_commands()
+            else:
+                self._dashboard_log(f"Invalid: only {cm.num_commands} commands", "warn")
+        else:
+            # Continuous mode: select this command for adjustment
+            if num < cm.num_commands:
+                self._selected_command_idx = num
+                name = cm.command_names[num]
+                val = cm.commands[num]
+                msg = f"Selected cmd[{num}]: {name} = {val:.2f}"
+                self._dashboard_log(msg, "info")
+                self._update_dashboard_commands()
+            else:
+                self._dashboard_log(f"Invalid: only {cm.num_commands} commands", "warn")
+    
+    def _select_prev_command(self) -> None:
+        """Select previous command index for adjustment."""
+        if not hasattr(self, 'command_manager'):
+            return
+        
+        cm = self.command_manager
+        self._selected_command_idx = (self._selected_command_idx - 1) % cm.num_commands
+        name = cm.command_names[self._selected_command_idx]
+        val = cm.commands[self._selected_command_idx]
+        msg = f"Selected cmd[{self._selected_command_idx}]: {name} = {val:.2f}"
+        self._dashboard_log(msg, "info")
+        self._update_dashboard_commands()
+    
+    def _select_next_command(self) -> None:
+        """Select next command index for adjustment."""
+        if not hasattr(self, 'command_manager'):
+            return
+        
+        cm = self.command_manager
+        self._selected_command_idx = (self._selected_command_idx + 1) % cm.num_commands
+        name = cm.command_names[self._selected_command_idx]
+        val = cm.commands[self._selected_command_idx]
+        msg = f"Selected cmd[{self._selected_command_idx}]: {name} = {val:.2f}"
+        self._dashboard_log(msg, "info")
+        self._update_dashboard_commands()
+    
+    def _adjust_command(self, delta: float) -> None:
+        """Adjust the selected command value.
+        
+        Args:
+            delta: Amount to add to the current command value
+        """
+        if not hasattr(self, 'command_manager'):
+            return
+        
+        cm = self.command_manager
+        
+        if cm.onehot_mode:
+            # In one-hot mode, +/- cycles through active indices
+            current_active = np.argmax(cm.commands)
+            if delta > 0:
+                new_active = (current_active + 1) % cm.num_commands
+            else:
+                new_active = (current_active - 1) % cm.num_commands
+            cm.set_onehot_by_index(new_active)
+            self._enable_keyboard_command_mode()
+            msg = f"Command: one-hot[{new_active}] = {cm.command_names[new_active]}"
+        else:
+            # Continuous mode: adjust value
+            idx = self._selected_command_idx
+            spec = cm.command_specs[idx]
+            old_val = cm.commands[idx]
+            
+            # Clamp to range if uniform type
+            if spec.type == "uniform":
+                new_val = np.clip(old_val + delta, spec.range[0], spec.range[1])
+            else:
+                new_val = old_val + delta
+            
+            cm.set_command(idx, new_val)
+            self._enable_keyboard_command_mode()
+            name = cm.command_names[idx]
+            msg = f"Cmd[{idx}] {name}: {old_val:.2f} → {new_val:.2f}"
+        
+        self._dashboard_log(msg, "info")
+        self._update_dashboard_commands()
+    
+    def _resample_commands_keyboard(self) -> None:
+        """Manually resample all commands via keyboard."""
+        if not hasattr(self, 'command_manager'):
+            return
+        
+        self.command_manager.resample()
+        self._dashboard_log("Commands resampled", "info")
+        self._update_dashboard_commands()
+    
+    def _toggle_keyboard_command_mode(self) -> None:
+        """Toggle between keyboard command control and auto-resample mode."""
+        self._keyboard_command_mode = not self._keyboard_command_mode
+        
+        if self._keyboard_command_mode:
+            # Disable auto-resampling
+            if hasattr(self, 'command_manager'):
+                self._saved_resampling_interval = self.command_manager.resampling_interval
+                self.command_manager.resampling_interval = 0
+            self._dashboard_log("Keyboard command mode: ON (auto-resample disabled)", "success")
+        else:
+            # Re-enable auto-resampling
+            if hasattr(self, 'command_manager') and hasattr(self, '_saved_resampling_interval'):
+                self.command_manager.resampling_interval = self._saved_resampling_interval
+            self._dashboard_log("Keyboard command mode: OFF (auto-resample enabled)", "info")
+        
+        self._update_dashboard_commands()
+    
+    def _enable_keyboard_command_mode(self) -> None:
+        """Enable keyboard command mode (disable auto-resample) if not already enabled."""
+        if not self._keyboard_command_mode:
+            self._keyboard_command_mode = True
+            if hasattr(self, 'command_manager'):
+                self._saved_resampling_interval = self.command_manager.resampling_interval
+                self.command_manager.resampling_interval = 0
+    
+    def _print_command_info(self) -> None:
+        """Print current command information to console and dashboard."""
+        if not hasattr(self, 'command_manager'):
+            self._dashboard_log("No command manager available", "warn")
+            return
+        
+        cm = self.command_manager
+        info = cm.get_command_info()
+        
+        lines = [
+            "─" * 50,
+            f"Commands ({cm.num_commands}D) | Mode: {'ONE-HOT' if cm.onehot_mode else 'CONTINUOUS'}",
+            f"Keyboard mode: {'ON' if self._keyboard_command_mode else 'OFF'} | "
+            f"Resample interval: {cm.resampling_interval}",
+            "─" * 50,
+        ]
+        
+        for i, (name, val) in enumerate(zip(cm.command_names, cm.commands)):
+            marker = "►" if i == self._selected_command_idx else " "
+            if cm.onehot_mode:
+                marker = "●" if val > 0.5 else "○"
+            spec = cm.command_specs[i]
+            range_str = f"[{spec.range[0]:.1f}, {spec.range[1]:.1f}]" if spec.type == "uniform" else spec.type
+            lines.append(f"  {marker} [{i}] {name}: {float(val):+.3f}  ({range_str})")
+        
+        lines.append("─" * 50)
+        lines.append("Keys: 0-9=select/activate, []=prev/next, +/-=adjust, R=resample, k=toggle mode")
+        
+        # Print to console
+        for line in lines:
+            print(line)
+        
+        # Log summary to dashboard
+        if cm.onehot_mode:
+            active_idx = np.argmax(cm.commands)
+            self._dashboard_log(f"Commands: one-hot[{active_idx}]={cm.command_names[active_idx]}", "info")
+        else:
+            self._dashboard_log(f"Commands: {dict(zip(cm.command_names, [f'{v:.2f}' for v in cm.commands]))}", "info")
+    
+    def _update_dashboard_commands(self) -> None:
+        """Update dashboard with current command state."""
+        if self.dashboard is None or not hasattr(self, 'command_manager'):
+            return
+        
+        cm = self.command_manager
+        
+        # Build command info for dashboard
+        if hasattr(self.dashboard, 'update_commands'):
+            self.dashboard.update_commands(
+                commands=cm.commands.copy(),
+                names=cm.command_names,
+                selected_idx=self._selected_command_idx,
+                onehot_mode=cm.onehot_mode,
+                keyboard_mode=self._keyboard_command_mode,
+            )
+        
+        # Also update via set_status for simpler dashboards
+        if cm.onehot_mode:
+            active_idx = np.argmax(cm.commands)
+            cmd_str = f"one-hot[{active_idx}]"
+        else:
+            cmd_str = " ".join([f"{v:+.1f}" for v in cm.commands])
+        
+        if hasattr(self.dashboard, 'set_status'):
+            mode_str = "K" if self._keyboard_command_mode else "A"  # K=keyboard, A=auto
+            self.dashboard.set_status("Cmd", f"{cmd_str} ({mode_str})")
 
     def _send_enable_command(self, enable: bool) -> None:
         """Send enable/disable command to all modules."""
