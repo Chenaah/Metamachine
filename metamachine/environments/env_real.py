@@ -258,9 +258,8 @@ class RealMetaMachine(Base):
         self._command_step_size = 0.1   # Step size for continuous command adjustment
         self._keyboard_command_mode = False  # True = keyboard controls commands, False = auto resample
         
-        # Per-motor gains
-        self.kps = np.ones(num_actions) * self.kp_default
-        self.kds = np.ones(num_actions) * self.kd_default
+        # Setup PD gains with per-joint control support (position/velocity hybrid)
+        self._setup_pd_gains(num_actions, cfg)
         
         # Statistics
         self.cmd_count = 0
@@ -309,7 +308,21 @@ class RealMetaMachine(Base):
         print("=" * 60)
         print("\nAction -> Module mapping:")
         for i, mod_id in enumerate(self.expected_module_ids):
-            print(f"  action[{i}] -> module {mod_id}")
+            # Show control mode for each joint
+            if self.joint_control_modes is not None:
+                mode = self.joint_control_modes[i]
+                mode_str = f" [{mode}]" if mode != 'position' else ""
+            else:
+                mode_str = ""
+            print(f"  action[{i}] -> module {mod_id}{mode_str}")
+        
+        # Show per-joint control summary if enabled
+        if self.joint_control_modes is not None and self.wheel_joint_indices:
+            print("\nPer-Joint Control:")
+            print(f"  Velocity joints (wheels): {self.wheel_joint_indices}")
+            print(f"  Wheel action scale: {self.wheel_action_scale}")
+            print(f"  Wheel kd: {[self.kds[i] for i in self.wheel_joint_indices]}")
+        
         if self.sensor_module_ids:
             print("\nSensor modules (no action):")
             for mod_id in self.sensor_module_ids:
@@ -332,6 +345,84 @@ class RealMetaMachine(Base):
             callback=self._on_module_feedback,
             timeout_sec=self.device_timeout,
         )
+
+    def _setup_pd_gains(self, num_actions: int, cfg: OmegaConf) -> None:
+        """Setup PD gains with optional per-joint configuration.
+        
+        This method supports:
+        1. Uniform gains (default): All joints use the same kp/kd
+        2. Wheel joints: Specific joints configured as velocity-controlled (kp=0, higher kd)
+        3. Fine-grained: Explicit per-joint kp/kd arrays
+        
+        For velocity-controlled joints (wheels), the action is interpreted as velocity target
+        rather than position offset. The ESP32 receives:
+        - target = 0 (position, multiplied by kp=0)
+        - target_vel = action * wheel_action_scale + default_velocity
+        - kp = 0 (no position control)
+        - kd = wheel_kd (velocity damping)
+        
+        Args:
+            num_actions: Number of action dimensions (must match len(module_ids))
+            cfg: Configuration object containing control parameters
+        """
+        per_joint_cfg = getattr(cfg.control, 'per_joint_control', None)
+        
+        if per_joint_cfg and per_joint_cfg.get('enabled', False):
+            # Initialize with global values
+            self.kps = np.full(num_actions, self.kp_default, dtype=np.float32)
+            self.kds = np.full(num_actions, self.kd_default, dtype=np.float32)
+            self.joint_control_modes = ['position'] * num_actions
+            self.default_dof_vel = np.zeros(num_actions, dtype=np.float32)
+            self.wheel_action_scale = 1.0
+            
+            # Apply wheel joints configuration
+            wheel_cfg = per_joint_cfg.get('wheel_joints', {})
+            wheel_indices = wheel_cfg.get('indices', [])
+            if wheel_indices:
+                wheel_kd = wheel_cfg.get('kd', 2.0)
+                default_vel = wheel_cfg.get('default_velocity', 0.0)
+                self.wheel_action_scale = wheel_cfg.get('action_scale', 1.0)
+                
+                for idx in wheel_indices:
+                    if idx >= num_actions:
+                        raise ValueError(
+                            f"Wheel joint index {idx} >= num_actions {num_actions}"
+                        )
+                    self.kps[idx] = 0.0  # No position control for wheels
+                    self.kds[idx] = wheel_kd
+                    self.joint_control_modes[idx] = 'velocity'
+                    self.default_dof_vel[idx] = default_vel
+            
+            # Override with explicit per-joint config if provided
+            if per_joint_cfg.get('per_joint_kp') is not None:
+                self.kps = np.array(per_joint_cfg.per_joint_kp, dtype=np.float32)
+            if per_joint_cfg.get('per_joint_kd') is not None:
+                self.kds = np.array(per_joint_cfg.per_joint_kd, dtype=np.float32)
+            if per_joint_cfg.get('per_joint_mode') is not None:
+                self.joint_control_modes = list(per_joint_cfg.per_joint_mode)
+                # Update default_dof_vel for velocity-controlled joints
+                for i, mode in enumerate(self.joint_control_modes):
+                    if mode == 'velocity' and i not in wheel_indices:
+                        self.default_dof_vel[i] = 0.0
+            
+            # Store wheel indices for later use
+            self.wheel_joint_indices = [
+                i for i, mode in enumerate(self.joint_control_modes) 
+                if mode == 'velocity'
+            ]
+            
+            print(f"[PD Gains] Per-joint control enabled:")
+            print(f"  Position joints: {[i for i, m in enumerate(self.joint_control_modes) if m == 'position']}")
+            print(f"  Velocity joints (wheels): {self.wheel_joint_indices}")
+            print(f"  Wheel action scale: {self.wheel_action_scale}")
+        else:
+            # Original behavior: uniform gains for all joints
+            self.kps = np.full(num_actions, self.kp_default, dtype=np.float32)
+            self.kds = np.full(num_actions, self.kd_default, dtype=np.float32)
+            self.joint_control_modes = None
+            self.default_dof_vel = None
+            self.wheel_joint_indices = []
+            self.wheel_action_scale = 1.0
 
     def _init_dashboard(self) -> None:
         """Initialize the Rich dashboard for real-time monitoring.
@@ -1017,6 +1108,40 @@ class RealMetaMachine(Base):
             rate.sleep()
             wait_count += 1
 
+    def _prepare_control_targets(self, action: np.ndarray) -> tuple:
+        """Prepare position and velocity control targets from actions.
+        
+        This method:
+        1. Separates actions into position/velocity targets based on per-joint control modes
+        
+        For position-controlled joints:
+            - pos_target = action
+            - vel_target = 0
+            
+        For velocity-controlled joints (wheels):
+            - pos_target = 0 (will be multiplied by kp=0)
+            - vel_target = action * wheel_action_scale + default_velocity
+
+        Args:
+            action: Raw action array from action processor
+            
+        Returns:
+            (pos_target, vel_target): Tuple of position and velocity targets
+        """
+        pos = action.copy()
+        vel = np.zeros_like(pos)
+
+        # Handle per-joint control modes (position vs velocity)
+        if self.joint_control_modes is not None:
+            for i, mode in enumerate(self.joint_control_modes):
+                if mode == 'velocity':
+                    # For wheel joints: action is velocity target
+                    vel[i] = (action[i] * self.wheel_action_scale 
+                              + self.default_dof_vel[i])
+                    pos[i] = 0  # Position target is 0 (will be multiplied by kp=0)
+
+        return pos, vel
+
     def _perform_action(
         self, 
         pos: np.ndarray, 
@@ -1034,22 +1159,28 @@ class RealMetaMachine(Base):
 
         Note:
             pos[i] is sent to expected_module_ids[i]
+            For wheel joints (velocity mode), pos is interpreted as velocity target.
         """
         if kps is not None:
             self.kps = kps
         if kds is not None:
             self.kds = kds
         
-        if vel is None:
-            vel = np.zeros_like(pos)
+        # Prepare control targets (handle position/velocity hybrid control)
+        # The 'pos' argument here is actually the raw action from the policy
+        pos_target, vel_target = self._prepare_control_targets(pos)
+        
+        # Override with explicit velocity if provided
+        if vel is not None:
+            vel_target = vel
         
         # Update dashboard with action (before sending)
         self._update_dashboard_action(pos)
         
         # Send commands to all modules
         sent = self._send_motor_commands(
-            positions=pos,
-            velocities=vel,
+            positions=pos_target,
+            velocities=vel_target,
             kps=self.kps,
             kds=self.kds,
             enable=self.motor_enabled

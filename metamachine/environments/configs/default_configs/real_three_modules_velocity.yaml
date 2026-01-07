@@ -1,0 +1,410 @@
+# Real Robot Configuration - Three Modules with Wheel Joints
+# 
+# This config file works for BOTH simulation and real robot deployment.
+# Set `environment.mode` to switch between modes:
+#   - mode: sim   -> Uses MetaMachine (simulation)
+#   - mode: real  -> Uses RealMetaMachine (ESP32 hardware)
+#
+# This config demonstrates per-joint control with mixed position/velocity modes.
+# Joint 0 uses position control, joints 1 and 2 use velocity control (wheels).
+#
+# NOTE: This is a standalone config (no _base) because the graph-based morphology
+# format is not compatible with OmegaConf merge on the list-based format.
+
+# =============================================================================
+# Pose Optimization (disabled for real robot)
+# =============================================================================
+pose_optimization:
+  enabled: false
+  drop_steps: 100
+  move_steps: 500
+  optimization_type: "stablefast"
+  load_pose: null
+
+# =============================================================================
+# Environment Mode
+# =============================================================================
+environment:
+  mode: real            # "sim" or "real" - controls which environment class is used
+  num_envs: 1           # Real robot always uses 1 environment
+
+# =============================================================================
+# Morphology (used by simulation, defines expected structure)
+# =============================================================================
+morphology:
+  robot_type: lego_legs
+  asset_file: null
+  restructure: true
+  
+  configuration:
+    metadata:
+      name: "lego_tripod_wheeled"
+      description: "3-legged robot with ball joints and wheel legs"
+      type: "lego_legs"
+    
+    components:
+      - component_type: ball
+        name: m0
+        params:
+          add_sites: true
+          passive: false
+      - component_type: ball
+        name: m1
+        params:
+          add_sites: true
+          passive: false
+      - component_type: ball
+        name: m2
+        params:
+          add_sites: true
+          passive: false
+      
+      - component_type: adaptor4
+        name: belly
+        params:
+          mass: 0.26
+      
+      - component_type: stick4
+        name: thigh0
+        params:
+          length: 0.24
+          mass: 0.128
+          dock_offset_angle: 0.0
+      - component_type: stick4
+        name: thigh1
+        params:
+          length: 0.24
+          mass: 0.128
+          dock_offset_angle: 0.0
+      - component_type: stick4
+        name: thigh2
+        params:
+          length: 0.24
+          mass: 0.128
+          dock_offset_angle: 0.0
+      
+      - component_type: stick4
+        name: calf0
+        params:
+          length: 0.24
+          mass: 0.126
+      - component_type: stick4
+        name: calf1
+        params:
+          length: 0.24
+          mass: 0.126
+      - component_type: stick4
+        name: calf2
+        params:
+          length: 0.24
+          mass: 0.126
+    
+    connections:
+      - source_component: belly
+        source_site: "0f"
+        target_component: thigh0
+        target_site: "1m"
+        params:
+          solref: "0.0001 1"
+          solimp: "1 1 0.01"
+      - source_component: m0
+        source_site: "0f"
+        target_component: thigh0
+        target_site: "0m"
+        params: {}
+      - source_component: calf0
+        source_site: "0m"
+        target_component: m0
+        target_site: "1f"
+        params: {}
+      
+      - source_component: belly
+        source_site: "1f"
+        target_component: thigh1
+        target_site: "1m"
+        params: {}
+      - source_component: m1
+        source_site: "0f"
+        target_component: thigh1
+        target_site: "0m"
+        params: {}
+      - source_component: calf1
+        source_site: "0m"
+        target_component: m1
+        target_site: "1f"
+        params: {}
+      
+      - source_component: belly
+        source_site: "2f"
+        target_component: thigh2
+        target_site: "1m"
+        params: {}
+      - source_component: m2
+        source_site: "0f"
+        target_component: thigh2
+        target_site: "0m"
+        params: {}
+      - source_component: calf2
+        source_site: "0m"
+        target_component: m2
+        target_site: "1f"
+        params: {}
+
+# =============================================================================
+# Real Robot Hardware Configuration
+# =============================================================================
+real:
+  # ---------------------------------------------------------------------------
+  # Module Configuration
+  # ---------------------------------------------------------------------------
+  # Active modules (receive motor commands)
+  # action[i] is sent to module_ids[i]
+  # Module 0 = position-controlled hip joint
+  # Module 1, 2 = velocity-controlled wheel joints
+  module_ids: [5, 21, 16]
+  
+  # Sensor-only modules (no motor commands, just provide sensor data)
+  sensor_module_ids: []
+  
+  # ---------------------------------------------------------------------------
+  # Global State Sources
+  # ---------------------------------------------------------------------------
+  sources:
+    main_imu: 5
+    # goal_distance: null  # Uncomment and set module ID if using distance sensor
+  
+  # ---------------------------------------------------------------------------
+  # Network Configuration
+  # ---------------------------------------------------------------------------
+  listen_port: 6666       # Port to receive sensor data from ESP32
+  command_port: 6667      # Port to send commands to ESP32
+  device_timeout: 2.0     # Seconds before module considered inactive
+  
+  # Control features
+  enable_filter: true     # Enable ESP32-side low-pass filter
+  
+  # Dashboard (optional Rich terminal UI)
+  enable_dashboard: true
+
+# =============================================================================
+# Control Interface
+# =============================================================================
+control:
+  dt: 0.05                # Control timestep (20 Hz)
+  num_actions: 3          # Number of actuated joints (must match len(module_ids))
+  action_scale: 1.0
+  symmetric_limit: 0.8
+  custom_limits: null
+  motor_range: [-6, 6]
+  
+  # ---------------------------------------------------------------------------
+  # Per-Joint Control Configuration (Position/Velocity Hybrid)
+  # ---------------------------------------------------------------------------
+  # This enables mixed control modes:
+  # - Position joints: action is position offset (kp > 0, kd > 0)
+  # - Velocity joints (wheels): action is velocity target (kp = 0, kd > 0)
+  per_joint_control:
+    enabled: true
+    wheel_joints:
+      indices: [1, 2]       # Joints 1 and 2 are velocity-controlled wheels
+      kd: 8.0               # Velocity damping for wheels
+      action_scale: 5.0     # Scale factor for wheel velocity commands
+  
+  # Observation masking for wheel joints (no encoder for wheel positions)
+  obs_masking:
+    enabled: true
+    exclude_joints:
+      dof_pos: [1, 2]       # Don't include wheel positions in observations
+      dof_vel: []           # Include all velocities
+  
+  # PD gains (default for position-controlled joints)
+  kp: 8.0
+  kd: 0.2
+  
+  # Initial/default positions
+  default_dof_pos: [0, 0.5, -0.5]
+  
+  # Action filtering
+  filter:
+    enabled: true
+    cutoff_freq: 3.0
+  filter_action: true
+
+  # Melter (disabled)
+  melter:
+    enabled: false
+    axis: 3
+  action_melter: false
+  action_melter_axis: 3
+  
+  action_remap_type: null
+  control_mode: position
+  
+  remapping:
+    enabled: false
+    remap_type: null
+    remap_params: null
+
+# =============================================================================
+# Observation
+# =============================================================================
+observation:
+  torso_node_id: 0
+  
+  # Modular observation mode (recommended for real robots)
+  modular:
+    enabled: true
+    num_modules: 3
+    main_module_index: 0    # Use module 0 for global observations
+    
+    per_module_components:
+      - name: projected_gravities
+        index_type: element
+      - name: gyros
+        index_type: element
+    
+    global_components:
+      - name: dof_pos
+      - name: dof_vel
+      - name: last_action
+
+  clip_observations: 100.0
+  include_history_steps: 3
+  
+  forward_vec: [1, 0, 0]
+  gravity_vec: [0, 0, -1]
+  projected_forward_vec: [0.0, 0.998583661722923, -0.05320404627506199]
+  projected_upward_vec: [0, 0.05320404627506199, 0.998583661722923]
+  
+  speed_calculation_steps: 100
+
+# =============================================================================
+# Task Configuration
+# =============================================================================
+task:
+  reward_components:
+    - name: locomotion_efficiency
+      type: windowed_displacement_efficiency
+      weight: 1.0
+      params:
+        window_size: 100
+        speed_weight: 1.0
+        efficiency_weight: 0.5
+        use_weld_cluster: true
+
+  termination_conditions:
+    termination_strategy: null    # No auto-termination for real robot
+    max_episode_steps: 1000
+
+  commands:
+    resampling_interval: 200
+    dimensions:
+      forward_speed:
+        type: uniform
+        range: [-0.5, 0.5]
+        initial_value: 0.3
+
+      turn_rate:
+        type: uniform
+        range: [-2, 2]
+        initial_value: 0.0
+
+# =============================================================================
+# Simulation Settings (only used when mode: sim)
+# =============================================================================
+simulation:
+  mj_dt: 0.025
+  render: true
+  render_size: [1024, 720]
+  tn_constraint: true
+  latency_scheme: -1
+  auto_generate_assets: false
+  random_latency_scheme: false
+  broken_motors: null
+  pyramidal_cone: false
+  terrain: null
+  terrain_params: null
+  reset_terrain: false
+  noisy_observations: false
+  noisy_actions: false
+  render_mode: 'mp4'
+  video_path: null
+  video_fps: null
+  video_record_interval: 100
+  video_name_pattern: "episode_{episode}_wheeled_tripod"
+
+# =============================================================================
+# Initialization
+# =============================================================================
+initialization:
+  init_pos: [0, 0, 0.35]
+  init_quat: [0.135, -0.781, -0.417, 0.444]
+  init_qpos: null
+  init_joint_pos: null
+  noisy_init: false
+  randomize_orientation: false
+  fully_randomize_orientation: false
+  randomize_ini_vel: false
+
+# =============================================================================
+# Randomization (only used when mode: sim)
+# =============================================================================
+randomization:
+  mass:
+    enabled: false
+    percentage: 0.1
+    offset: 0
+
+  friction:
+    enabled: true
+    range: [0.8, 1.2]
+    detailed_range: [[0.8, 1.0], [0.3, 0.5]]
+    rolling:
+      enabled: false
+      range: [0.0001, 0.0005]
+
+  damping:
+    enabled: false
+    range: [0.02, 0.2]
+    armature_range: [0.01, 0.05]
+
+  action_noise:
+    enabled: false
+    std: 0.1
+
+  observation_noise:
+    enabled: false
+    std: 0.2
+
+  pd_controller:
+    enabled: false
+    kp_range: [15, 25]
+    kd_range: [0.3, 0.8]
+
+  external_torque:
+    enabled: false
+    range: [0, 4]
+    bodies: [2]
+
+  external_force:
+    enabled: false
+
+  assemble_error: false
+  dof_pos:
+    enabled: false
+    range: [-1, 1]
+
+  init_joint_pos:
+    enabled: true
+
+# =============================================================================
+# Logging
+# =============================================================================
+logging:
+  create_log_dir: true
+  data_dir: null
+  robot_data_dir: null      # Set to a path to log real robot data
+  log_raw_data: false       # Enable to log all sensor data to file
+  log_sa_data: false
+  print_data: false
+
