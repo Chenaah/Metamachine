@@ -11,6 +11,7 @@ Features:
 - Supports passive sensor modules (e.g., dedicated distance sensors)
 - Configurable global state sources (main IMU, goal distance)
 - Optional Rich dashboard for real-time monitoring
+- Multi-model support for A/B testing and comparison
 - Keyboard controls: e=enable, d=disable, r=restart, c=calibrate, q=quit
 
 Usage:
@@ -25,23 +26,24 @@ Usage:
     
     # Load and run a trained policy
     python examples/real_robots.py --policy path/to/policy.pt
+    
+    # Load from training log with custom module IDs
+    python examples/real_robots.py --log-dir logs/experiment --module-ids 5 21 16
+    
+    # Load MULTIPLE models for comparison (switch with , and . keys)
+    python examples/real_robots.py -L logs/baseline logs/improved \\
+        --module-ids 5 21 16
 
 Before running:
     1. Configure ESP32 modules with their module_ids (0, 1, 2, ...)
     2. Configure ESP32 to send data to this computer's IP on port 6666
     3. Ensure the module_ids in config match your physical modules
 
-Module Types:
-    - Active modules (module_ids): Receive motor commands, action[i] -> module_ids[i]
-    - Sensor modules (sensor_module_ids): No motor commands, sensor data only
-    
-    Example config for 3 active modules + 1 sensor module:
-        real:
-          module_ids: [0, 1, 2]       # 3 active modules
-          sensor_module_ids: [100]    # 1 dedicated distance sensor
-          sources:
-            main_imu: 0               # Module 0 provides main quat/gyro
-            goal_distance: 100        # Module 100 provides global goal_distance
+Keyboard Controls:
+    Motor:    e=enable, d=disable, r=restart, c=calibrate, q=quit
+    Commands: 0-9=select/set, []=prev/next, +/-=adjust
+              R=resample, k=toggle keyboard mode, i=info
+    Models:   , (comma)=prev model, . (period)=next model, /=list models
 
 Copyright 2025 Chen Yu <chenyu@u.northwestern.edu>
 Licensed under the Apache License, Version 2.0
@@ -110,12 +112,20 @@ Examples:
     # Load from training log with sensor modules
     python real_robots.py --log-dir logs/experiment --module-ids 5 21 16 --sensor-module-ids 100
     
+    # Load MULTIPLE models for comparison (switch with , and . keys)
+    python real_robots.py -L logs/baseline logs/improved logs/experimental \\
+        --module-ids 5 21 16
+    
+    # Load multiple models with custom display names
+    python real_robots.py -L logs/run1 logs/run2 logs/run3 \\
+        --model-names "Baseline" "NewReward" "Latest" \\
+        --module-ids 5 21 16
+    
 Keyboard Controls (during operation):
-    e - Enable motors
-    d - Disable motors
-    r - Restart motors
-    c - Calibrate motors
-    q - Quit
+    Motor:    e=enable, d=disable, r=restart, c=calibrate, q=quit
+    Commands: 0-9=select/set, []=prev/next, +/-=adjust
+              R=resample, k=toggle keyboard mode, i=info
+    Models:   , (comma)=prev model, . (period)=next model, /=list models
         """
     )
     
@@ -158,6 +168,22 @@ Keyboard Controls (during operation):
         type=str,
         default=None,
         help="Path to training log directory (loads config and checkpoint from there)"
+    )
+    
+    parser.add_argument(
+        "--log-dirs", "-L",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Multiple log directories to load policies from (switch with ,./)"
+    )
+    
+    parser.add_argument(
+        "--model-names",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Display names for each model (default: directory names)"
     )
     
     parser.add_argument(
@@ -255,6 +281,10 @@ def load_policy(policy_path: str, env):
         return None
 
 
+# =============================================================================
+# Run Functions
+# =============================================================================
+
 def run_sinusoidal_test(env, amplitude: float, frequency: float, duration: float = None):
     """Run sinusoidal test motion.
     
@@ -289,14 +319,13 @@ def run_sinusoidal_test(env, amplitude: float, frequency: float, duration: float
                 break
             
             # Generate sinusoidal action
-            # Each motor gets the same sine wave (can be customized)
             num_actions = env.action_space.shape[0]
             phase = 2 * np.pi * frequency * elapsed
             
             # Create action with phase offset per motor for gait-like motion
             action = np.zeros(num_actions)
             for i in range(num_actions):
-                phase_offset = (2 * np.pi * i) / num_actions  # Distribute phases
+                phase_offset = (2 * np.pi * i) / num_actions
                 action[i] = amplitude * np.sin(phase + phase_offset)
             
             # Execute step
@@ -449,6 +478,93 @@ def run_sb3_policy(env, model, duration: float = None, deterministic: bool = Tru
               f"{episode_count} episodes in {elapsed:.1f}s")
 
 
+def run_sb3_policy_multi(env, runner, duration: float = None, deterministic: bool = True):
+    """Run multiple SB3 policies with runtime switching.
+    
+    Args:
+        env: RealMetaMachine environment
+        runner: MultiModelRunner with loaded models
+        duration: Duration in seconds (None = run until interrupt)
+        deterministic: Use deterministic actions (no exploration noise)
+    """
+    print("\n" + "=" * 60)
+    print("Running Multi-Model Policy")
+    print("=" * 60)
+    print(f"  Models loaded: {runner.num_models}")
+    print(f"  Current model: {runner.get_status_string()}")
+    print(f"  Duration: {'infinite' if duration is None else f'{duration}s'}")
+    print(f"  Deterministic: {deterministic}")
+    print("=" * 60)
+    print("\nModel switching:")
+    print("  , (comma)  - Previous model")
+    print("  . (period) - Next model")
+    print("  / (slash)  - Show model list")
+    print("\nMotor controls: e=enable, d=disable, q=quit")
+    
+    # Register model runner with environment for keyboard handling
+    env.model_runner = runner
+    
+    # Update dashboard with initial model info
+    if hasattr(env, '_update_dashboard_model'):
+        env._update_dashboard_model()
+    
+    # Log model list to dashboard
+    if hasattr(env, '_dashboard_log'):
+        env._dashboard_log(f"Loaded {runner.num_models} models. Use ,/./slash to switch.", "info")
+        for i, (name, obs_dim) in enumerate(zip(runner.model_names, runner.obs_dims)):
+            marker = "►" if i == runner.current_idx else " "
+            env._dashboard_log(f"  {marker}[{i+1}] {name} (obs={obs_dim})", "info")
+    
+    # Reset environment
+    obs, info = env.reset()
+    
+    start_time = time.time()
+    step_count = 0
+    episode_reward = 0
+    episode_count = 0
+    
+    try:
+        while True:
+            elapsed = time.time() - start_time
+            
+            # Check duration
+            if duration is not None and elapsed >= duration:
+                print(f"\n[Done] Reached duration limit ({duration}s)")
+                break
+            
+            # Get action from current model (with automatic observation adaptation)
+            action, _ = runner.predict(obs, deterministic=deterministic)
+            
+            # Execute step
+            obs, reward, done, truncated, info = env.step(action)
+            step_count += 1
+            episode_reward += reward
+            
+            # Print status periodically
+            if step_count % 100 == 0:
+                model_status = runner.get_status_string()
+                print(f"\r[Step {step_count}] Model: {model_status}, "
+                      f"Reward: {episode_reward:.2f}", end="", flush=True)
+            
+            # Check for episode end
+            if done or truncated:
+                episode_count += 1
+                print(f"\n[Episode {episode_count}] Model: {runner.current_name}, "
+                      f"Reward: {episode_reward:.2f}")
+                obs, info = env.reset()
+                episode_reward = 0
+    
+    except KeyboardInterrupt:
+        print("\n[Interrupted]")
+    
+    finally:
+        # Clean up
+        env.model_runner = None
+        elapsed = time.time() - start_time
+        print(f"\n\nMulti-model run completed: {step_count} steps, "
+              f"{episode_count} episodes in {elapsed:.1f}s")
+
+
 def run_idle(env, duration: float = None):
     """Run in idle mode - just monitor modules without motion.
     
@@ -505,6 +621,10 @@ def run_idle(env, duration: float = None):
         print(f"\nIdle mode ended: {step_count} steps in {elapsed:.1f}s")
 
 
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
 def main():
     """Main entry point."""
     # Setup signal handler
@@ -517,7 +637,62 @@ def main():
     print("Real Robot Control - RealMetaMachine")
     print("=" * 60)
     
-    # Check if loading from training log directory
+    # Check if loading multiple policies
+    if args.log_dirs:
+        # Multi-policy mode - use utility module
+        print(f"\nMulti-policy mode: Loading from {len(args.log_dirs)} directories")
+        try:
+            from metamachine.utils.policy_runner import load_policies
+            
+            # Load all policies
+            runner, first_cfg = load_policies(
+                args.log_dirs,
+                policy_names=args.model_names,
+                checkpoint=args.checkpoint
+            )
+            
+            if runner.num_policies == 0:
+                print("Error: No policies loaded successfully. Exiting.")
+                return
+            
+            # Build cfg_real overrides from CLI arguments
+            cfg_real_overrides = {}
+            if args.module_ids is not None:
+                cfg_real_overrides["module_ids"] = args.module_ids
+            if args.sensor_module_ids is not None:
+                cfg_real_overrides["sensor_module_ids"] = args.sensor_module_ids
+            if args.no_dashboard:
+                cfg_real_overrides["enable_dashboard"] = False
+            
+            # Create real robot environment from first config
+            if first_cfg is not None:
+                # Apply real robot overrides
+                if cfg_real_overrides:
+                    if not hasattr(first_cfg, 'real') or first_cfg.real is None:
+                        first_cfg.real = {}
+                    for key, value in cfg_real_overrides.items():
+                        setattr(first_cfg.real, key, value)
+                
+                # Force real mode
+                first_cfg.environment.mode = "real"
+                
+                env = create_environment(first_cfg)
+            else:
+                print("Error: No config available. Exiting.")
+                return
+            
+            try:
+                run_sb3_policy_multi(env, runner, duration=args.duration)
+            finally:
+                print("\nCleaning up...")
+                env.close()
+            return
+            
+        except ImportError as e:
+            print(f"Error: Could not import policy_runner utilities: {e}")
+            return
+    
+    # Check if loading from single training log directory
     if args.log_dir:
         # Use load_from_checkpoint utility for seamless loading
         print(f"\nLoading from training log: {args.log_dir}")

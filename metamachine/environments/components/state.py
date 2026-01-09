@@ -1631,7 +1631,6 @@ class State:
         for module_idx in module_indices:
             module_obs_parts = []
             for component in self.modular_components:
-                # print(f"Component: {component.name}")
                 try:
                     data = component.get_data_for_module(self, module_idx)
                     flattened_data = np.asarray(data).flatten()

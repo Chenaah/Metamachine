@@ -204,9 +204,9 @@ class CommandManager:
     def _setup_default_commands(self) -> None:
         """Setup default 3D command specifications."""
         default_specs = [
-            {"name": "x_velocity", "type": "uniform", "range": [-1.0, 1.0]},
-            {"name": "y_velocity", "type": "uniform", "range": [-1.0, 1.0]},
-            {"name": "yaw_rate", "type": "uniform", "range": [-1.0, 1.0]},
+            # {"name": "x_velocity", "type": "uniform", "range": [-1.0, 1.0]},
+            # {"name": "y_velocity", "type": "uniform", "range": [-1.0, 1.0]},
+            # {"name": "yaw_rate", "type": "uniform", "range": [-1.0, 1.0]},
         ]
 
         for spec_config in default_specs:

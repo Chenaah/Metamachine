@@ -50,6 +50,15 @@ __all__ = [
     "play_checkpoint",
     "continue_training",
     "compare_configs",
+    # Policy runner utilities
+    "PolicyRunner",
+    "load_policies",
+    "load_policy_standalone",
+    "find_checkpoint_path",
+    # Legacy aliases
+    "MultiModelRunner",
+    "load_multiple_models",
+    "load_model_standalone",
 ]
 
 # SB3 utilities (optional import - only available if stable-baselines3 is installed)
@@ -74,3 +83,24 @@ except ImportError:
     play_checkpoint = None
     continue_training = None
     compare_configs = None
+
+# Policy runner utilities
+try:
+    from .policy_runner import (
+        PolicyRunner,
+        load_policies,
+        load_policy_standalone,
+        find_checkpoint_path,
+        # Legacy aliases
+        MultiModelRunner,
+        load_multiple_models,
+        load_model_standalone,
+    )
+except ImportError:
+    PolicyRunner = None
+    load_policies = None
+    load_policy_standalone = None
+    find_checkpoint_path = None
+    MultiModelRunner = None
+    load_multiple_models = None
+    load_model_standalone = None

@@ -332,6 +332,7 @@ class RealMetaMachine(Base):
         print("  Motor:    e=enable, d=disable, r=restart, c=calibrate")
         print("  Commands: 0-9=select/set, []=prev/next, +/-=adjust")
         print("            R=resample, k=toggle keyboard mode, i=info")
+        print("  Models:   ,=prev model, .=next model, /=list models")
         print("-" * 60)
         print("\nWaiting for ESP32 modules to connect...")
 
@@ -768,7 +769,7 @@ class RealMetaMachine(Base):
         main_quat, main_gyro = self._get_module_imu_data(self.main_imu_module_id)
         
         # Global goal distance from configured module (if specified)
-        global_goal_distance = None
+        global_goal_distance = -1.0
         if self.goal_distance_module_id is not None:
             global_goal_distance = self._get_module_goal_distance(self.goal_distance_module_id)
         
@@ -798,6 +799,14 @@ class RealMetaMachine(Base):
             "main_imu_module": self.main_imu_module_id,
             "goal_distance_module": self.goal_distance_module_id,
         }
+        
+        # Update state.raw with observable data so observation components can read it
+        # (This is normally done in base._update_state AFTER _get_observable_data returns,
+        #  but we need it updated NOW for dashboard observation display)
+        if hasattr(self, 'state'):
+            self.state.raw.update(self.observable_data)
+            # Also update derived state (projected_gravity, etc.)
+            self._compute_derived_state()
         
         # Update dashboard performance and RL state
         if self.dashboard is not None:
@@ -885,10 +894,16 @@ class RealMetaMachine(Base):
             
             # Also update command panel on every step
             self._update_dashboard_commands()
+            
+            # Update model info if available
+            self._update_dashboard_model()
         else:
             # MotorDashboard - use set_status
             self.dashboard.set_status("Cmd/Fb", f"{self.cmd_count}/{self.fb_count}")
             self.dashboard.set_status("Modules", f"{len(self.connected_modules)}/{total_expected}")
+            
+            # Update model info if available
+            self._update_dashboard_model()
         
         self.dashboard.update()
     
@@ -989,20 +1004,90 @@ class RealMetaMachine(Base):
                 command_obs_components["commands"] = cmd_array
             
             # Get observation components actually used in policy
-            if hasattr(self.state, 'observation_components') and self.state.observation_components:
-                for component in self.state.observation_components:
-                    try:
-                        data = component.get_data(self.state)
-                        if data is not None:
-                            arr = np.asarray(data).flatten()
-                            # Check if this is the commands component (already added above)
-                            if 'command' in component.name.lower():
-                                # Skip - already added from command_manager
-                                continue
-                            used_components[component.name] = arr
-                    except Exception as e:
-                        # Log component failures to dashboard
-                        self._dashboard_log(f"Obs '{component.name}' failed: {e}", "warn")
+            # Check both flat mode (observation_components) and modular mode (modular_components + global_components)
+            obs_components = getattr(self.state, 'observation_components', []) or []
+            modular_components = getattr(self.state, 'modular_components', []) or []
+            global_components = getattr(self.state, 'global_components', []) or []
+            is_modular = getattr(self.state, 'modular_mode', False)
+            
+            # Collect all component names for marking as "used"
+            all_policy_components = []
+            if is_modular:
+                all_policy_components = modular_components + global_components
+            else:
+                all_policy_components = obs_components
+            
+            # Debug: log observation components info once
+            if not hasattr(self, '_logged_obs_components_info'):
+                self._logged_obs_components_info = True
+                if all_policy_components:
+                    names = [c.name for c in all_policy_components]
+                    mode_str = "modular" if is_modular else "flat"
+                    self._dashboard_log(f"Obs ({mode_str}, {len(names)}): {names}", "info")
+                else:
+                    self._dashboard_log("No observation components found in state", "warn")
+            
+            # Process flat observation components
+            for component in obs_components:
+                # Skip commands component - already added from command_manager
+                if 'command' in component.name.lower():
+                    continue
+                
+                try:
+                    data = component.get_data(self.state)
+                    if data is not None:
+                        arr = np.asarray(data).flatten()
+                        used_components[component.name] = arr
+                    else:
+                        used_components[component.name] = np.array([0.0])
+                except Exception as e:
+                    used_components[component.name] = np.array([float('nan')])
+                    if not hasattr(self, '_logged_obs_errors'):
+                        self._logged_obs_errors = set()
+                    if component.name not in self._logged_obs_errors:
+                        self._dashboard_log(f"Obs '{component.name}': {e}", "warn")
+                        self._logged_obs_errors.add(component.name)
+            
+            # Process modular components (show first module as representative)
+            for component in modular_components:
+                if 'command' in component.name.lower():
+                    continue
+                
+                try:
+                    # Get data for module 0 as representative
+                    data = component.get_data_for_module(self.state, 0)
+                    if data is not None:
+                        arr = np.asarray(data).flatten()
+                        used_components[f"{component.name}[0]"] = arr
+                    else:
+                        used_components[f"{component.name}[0]"] = np.array([0.0])
+                except Exception as e:
+                    used_components[f"{component.name}[0]"] = np.array([float('nan')])
+                    if not hasattr(self, '_logged_obs_errors'):
+                        self._logged_obs_errors = set()
+                    if component.name not in self._logged_obs_errors:
+                        self._dashboard_log(f"ModObs '{component.name}': {e}", "warn")
+                        self._logged_obs_errors.add(component.name)
+            
+            # Process global components
+            for component in global_components:
+                if 'command' in component.name.lower():
+                    continue
+                
+                try:
+                    data = component.get_data(self.state)
+                    if data is not None:
+                        arr = np.asarray(data).flatten()
+                        used_components[component.name] = arr
+                    else:
+                        used_components[component.name] = np.array([0.0])
+                except Exception as e:
+                    used_components[component.name] = np.array([float('nan')])
+                    if not hasattr(self, '_logged_obs_errors'):
+                        self._logged_obs_errors = set()
+                    if component.name not in self._logged_obs_errors:
+                        self._dashboard_log(f"GlobObs '{component.name}': {e}", "warn")
+                        self._logged_obs_errors.add(component.name)
             
             # Also include raw observable data for debugging
             if self.observable_data:
@@ -1069,6 +1154,39 @@ class RealMetaMachine(Base):
         yaw = np.arctan2(siny_cosp, cosy_cosp)
         
         return np.array([roll, pitch, yaw])
+    
+    def _compute_derived_state(self) -> None:
+        """Compute derived state values (projected_gravity, etc.) from raw state.
+        
+        This is needed because observation components often use derived state
+        that must be computed from raw IMU data.
+        """
+        if not hasattr(self, 'state') or not hasattr(self.state, 'derived'):
+            return
+        
+        # Compute projected gravity from quaternion
+        if 'quat' in self.observable_data and self.observable_data['quat'] is not None:
+            quat = self.observable_data['quat']
+            gravity_world = np.array([0.0, 0.0, -1.0])
+            projected_gravity = self._rotate_vector_by_quat_inv(gravity_world, quat)
+            self.state.derived.projected_gravity = projected_gravity
+        
+        # Compute per-module projected gravities if available
+        if 'quats' in self.observable_data and self.observable_data['quats'] is not None:
+            quats = self.observable_data['quats']
+            gravity_world = np.array([0.0, 0.0, -1.0])
+            projected_gravities = []
+            for q in quats:
+                pg = self._rotate_vector_by_quat_inv(gravity_world, q)
+                projected_gravities.append(pg)
+            self.state.derived.projected_gravities = np.array(projected_gravities)
+    
+    def _rotate_vector_by_quat_inv(self, v: np.ndarray, q: np.ndarray) -> np.ndarray:
+        """Rotate a vector by the inverse of a quaternion (world to body frame)."""
+        # Conjugate of quaternion for inverse rotation
+        qx, qy, qz, qw = q
+        q_conj = np.array([-qx, -qy, -qz, qw])
+        return self._rotate_vector_by_quat(v, q_conj)
 
     def _wait_until_motor_on(self) -> None:
         """Wait until all expected robot modules (active + sensor) are ready."""
@@ -1103,6 +1221,10 @@ class RealMetaMachine(Base):
                 if inactive:
                     status += f" Inactive: {inactive}"
                 print(status)
+            
+            # Update dashboard display to show module connection progress
+            if self.dashboard is not None:
+                self.dashboard.update()
             
             self._check_input()
             rate.sleep()
@@ -1298,6 +1420,11 @@ class RealMetaMachine(Base):
             +/-: Increase/decrease selected command value
             R (shift+r): Resample all commands
             k: Toggle keyboard command mode (disables auto-resample)
+        
+        Model Switching (when multiple models loaded):
+            ,: Previous model
+            .: Next model
+            /: Show model list
             
         Info:
             i: Print current command info
@@ -1342,6 +1469,14 @@ class RealMetaMachine(Base):
             # Print command info
             elif self.input_key == "i":
                 self._print_command_info()
+            
+            # Model switching controls (, . /)
+            elif self.input_key == ",":
+                self._switch_to_prev_model()
+            elif self.input_key == ".":
+                self._switch_to_next_model()
+            elif self.input_key == "/":
+                self._show_model_list()
             
             if time.time() - self.last_motor_com_time > 0.5:
                 self._reset_motor_commands()
@@ -1592,6 +1727,103 @@ class RealMetaMachine(Base):
         if hasattr(self.dashboard, 'set_status'):
             mode_str = "K" if self._keyboard_command_mode else "A"  # K=keyboard, A=auto
             self.dashboard.set_status("Cmd", f"{cmd_str} ({mode_str})")
+
+    # =========================================================================
+    # Model Switching Methods (for multi-model mode)
+    # =========================================================================
+    
+    def _switch_to_prev_model(self) -> None:
+        """Switch to the previous model (if model_runner is available)."""
+        if not hasattr(self, 'model_runner') or self.model_runner is None:
+            self._dashboard_log("No model runner attached (single model mode)", "warn")
+            return
+        
+        runner = self.model_runner
+        if runner.num_models <= 1:
+            self._dashboard_log("Only one model loaded", "info")
+            return
+        
+        old_name = runner.current_name
+        old_obs_dim = runner.current_obs_dim
+        new_name = runner.prev_model()
+        new_obs_dim = runner.current_obs_dim
+        
+        # Build status message with obs dim info if they differ
+        if old_obs_dim != new_obs_dim:
+            msg = f"◄ {new_name} (obs={new_obs_dim}) [{runner.current_idx + 1}/{runner.num_models}]"
+        else:
+            msg = f"◄ {new_name} [{runner.current_idx + 1}/{runner.num_models}]"
+        
+        self._dashboard_log(msg, "success")
+        print(f"\n[Model Switch] {old_name} → {new_name}")
+        self._update_dashboard_model()
+    
+    def _switch_to_next_model(self) -> None:
+        """Switch to the next model (if model_runner is available)."""
+        if not hasattr(self, 'model_runner') or self.model_runner is None:
+            self._dashboard_log("No model runner attached (single model mode)", "warn")
+            return
+        
+        runner = self.model_runner
+        if runner.num_models <= 1:
+            self._dashboard_log("Only one model loaded", "info")
+            return
+        
+        old_name = runner.current_name
+        old_obs_dim = runner.current_obs_dim
+        new_name = runner.next_model()
+        new_obs_dim = runner.current_obs_dim
+        
+        # Build status message with obs dim info if they differ
+        if old_obs_dim != new_obs_dim:
+            msg = f"► {new_name} (obs={new_obs_dim}) [{runner.current_idx + 1}/{runner.num_models}]"
+        else:
+            msg = f"► {new_name} [{runner.current_idx + 1}/{runner.num_models}]"
+        
+        self._dashboard_log(msg, "success")
+        print(f"\n[Model Switch] {old_name} → {new_name}")
+        self._update_dashboard_model()
+    
+    def _show_model_list(self) -> None:
+        """Show list of loaded models."""
+        if not hasattr(self, 'model_runner') or self.model_runner is None:
+            self._dashboard_log("No model runner attached (single model mode)", "warn")
+            print("\n[Model Info] Single model mode - no model runner attached")
+            return
+        
+        runner = self.model_runner
+        print(runner.get_model_list())
+        
+        # Log each model to dashboard
+        self._dashboard_log(f"═══ Models ({runner.num_models}) ═══", "info")
+        for i, name in enumerate(runner.model_names):
+            marker = "►" if i == runner.current_idx else " "
+            obs_dim = runner.obs_dims[i] if hasattr(runner, 'obs_dims') else "?"
+            self._dashboard_log(f"{marker}[{i+1}] {name} (obs={obs_dim})", "info")
+    
+    def _update_dashboard_model(self) -> None:
+        """Update dashboard with current model info."""
+        if self.dashboard is None:
+            return
+        
+        if hasattr(self, 'model_runner') and self.model_runner is not None:
+            runner = self.model_runner
+            
+            # Update status bar with current model
+            status = runner.get_status_string()
+            if hasattr(self.dashboard, 'set_status'):
+                self.dashboard.set_status("Model", status)
+            
+            # Update model panel if RLDashboard supports it
+            if hasattr(self.dashboard, 'update_models'):
+                self.dashboard.update_models(
+                    model_names=runner.model_names,
+                    current_idx=runner.current_idx,
+                    obs_dims=runner.obs_dims if hasattr(runner, 'obs_dims') else None,
+                )
+            
+            # Also log to dashboard log panel
+            # (Only on switch, not every frame - handled in switch methods)
 
     def _send_enable_command(self, enable: bool) -> None:
         """Send enable/disable command to all modules."""
